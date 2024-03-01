@@ -1,12 +1,7 @@
-## Hi there 👋
+# Allora Network
 
-<!--
+A self improving decentralized network.
 
-**Here are some ideas to get you started:**
+#### Project Links: 
 
-🙋‍♀️ A short introduction - what is your organization all about?
-🌈 Contribution guidelines - how can the community get involved?
-👩‍💻 Useful resources - where can the community find your docs? Is there anything else the community should know?
-🍿 Fun facts - what does your team eat for breakfast?
-🧙 Remember, you can do mighty things with the power of [Markdown](https://docs.github.com/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)
--->
+[Website](https://www.allora.network/) - [Discord](https://discord.gg/allora) - [X](https://twitter.com/AlloraNetwork) - [Documentation](https://docs.allora.network/docs/welcome-to-the-allora-docs) - [Litepaper](https://twitter.com/AlloraNetwork/status/1762909716135444883/photo/1)
