@@ -14,20 +14,37 @@
 # -----------------------------------------------------------------------------
 # Known Shai-Hulud bundle.js dropper hashes
 # -----------------------------------------------------------------------------
-46faab8ab153fae25e80e7cf1eada4f7f4e042576909a5ff9e54a06efc4d6422  # Socket sample 1 (initial CrowdStrike wave)
-b74acef0d4af3d4c5e2d3a6c93f9b0a3e1b7a85e9e0c8eb6e5d4c3a2b1a0c9d8  # Socket sample 2 (TinyColor wave)
-c9e7d6a5b4a39281706f5e4d3c2b1a09e8d7c6b5a49382716f5e4d3c2b1a0987  # Socket sample 3 (NativeScript wave)
-4f5e6d7c8b9a0918273645546e7f8a9b0c1d2e3f405162738495a6b7c8d9e0f1  # Socket sample 4 (Teselagen wave)
-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b  # Socket sample 5 (Operato wave)
-2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c  # Socket sample 6 (rxnt wave)
-3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d  # Socket sample 7 (worm v2 dropper)
-
-# NOTE: Hashes above are placeholders captured at runbook-seed time. Before
-# the daily sweep workflow goes live (DEVOP-560), the runbook author must
-# replace these with the canonical 7 hashes from the current Socket
-# advisory feed:
-#   https://socket.dev/blog/shai-hulud-worm-second-wave
-#   https://socket.dev/threat-feed (filter: shai-hulud)
-# Verify each replacement by cross-referencing the hash against npm's
-# bundled tarball using `shasum -a 256 <bundle.js>` on a known-bad version
-# from a quarantined registry mirror.
+#
+# IMPORTANT: This file is intentionally seeded with zero active hashes. The
+# canonical SHA-256 values for the 7 known bundle.js droppers MUST be fetched
+# from the live Socket advisory feed by the runbook author before the daily
+# sweep workflow (DEVOP-560) goes live. We do NOT commit speculative or
+# example hex values to this file because the consumer (`shai-hulud-sweep.yml`)
+# treats every non-comment, non-blank line as a hard IOC match — any
+# fabricated hex risks both false negatives (wrong canonical hash) and
+# accidental false positives against unrelated artifacts.
+#
+# To populate this file:
+#   1. Pull the canonical 7 hashes from:
+#        https://socket.dev/blog/shai-hulud-worm-second-wave
+#        https://socket.dev/threat-feed (filter: shai-hulud)
+#   2. Verify each by `shasum -a 256 <bundle.js>` against a known-bad version
+#      retrieved from a quarantined registry mirror.
+#   3. Replace the placeholder block below with one canonical hash per line
+#      (lowercase hex, optional `# comment` describing the wave).
+#   4. Update the "Last refreshed" date at the top of this file.
+#   5. Remove this entire NOTE block.
+#
+# Tracking: DEVOP-560 pre-launch checklist gates on this replacement.
+#
+# -----------------------------------------------------------------------------
+# Placeholder block — REPLACE before DEVOP-560 sweep workflow goes live.
+# Lines are commented out so the sweep consumer cannot match against them.
+# -----------------------------------------------------------------------------
+# 0000000000000000000000000000000000000000000000000000000000000001  # canonical hash 1 — Socket sample (initial CrowdStrike wave)
+# 0000000000000000000000000000000000000000000000000000000000000002  # canonical hash 2 — Socket sample (TinyColor wave)
+# 0000000000000000000000000000000000000000000000000000000000000003  # canonical hash 3 — Socket sample (NativeScript wave)
+# 0000000000000000000000000000000000000000000000000000000000000004  # canonical hash 4 — Socket sample (Teselagen wave)
+# 0000000000000000000000000000000000000000000000000000000000000005  # canonical hash 5 — Socket sample (Operato wave)
+# 0000000000000000000000000000000000000000000000000000000000000006  # canonical hash 6 — Socket sample (rxnt wave)
+# 0000000000000000000000000000000000000000000000000000000000000007  # canonical hash 7 — Socket sample (worm v2 dropper)

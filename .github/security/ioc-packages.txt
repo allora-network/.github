@@ -124,7 +124,29 @@ npm:rxnt-authentication@0.0.6
 npm:rxnt-healthchecks-nestjs@1.0.5
 npm:rxnt-kue@1.0.7
 
-# NOTE: the auto-refresh workflow (DEVOP-560) will append the remaining
-# packages in the 526-package wave directly from the Socket free feed.
-# Manual seeding stops here to avoid stale duplication; treat anything
-# matching the org-prefixes above as suspect until the feed catches up.
+# -----------------------------------------------------------------------------
+# Gap notice — remaining 526-wave entries are pulled live, not hand-seeded.
+# -----------------------------------------------------------------------------
+#
+# The lines above are the canonical compromised-package roots from the wave
+# bulletins we currently have authoritative version-pin data for. The full
+# 526-package wave from the Sept-2025 CrowdStrike disclosure is intentionally
+# NOT hand-typed into this file: pasting partial / stale @version pins here
+# would risk both false negatives (wrong version range) and false positives
+# (mistyped names that collide with unrelated packages).
+#
+# Instead, the remaining 526-wave entries are appended at run time from the
+# Socket free feed by the daily sweep workflow (DEVOP-560), which is the
+# authoritative source. Until DEVOP-560 ships, two compensating controls
+# apply:
+#
+#   1. The Socket CLI guard in CONTRIBUTING.md (DEVOP-572) blocks installs
+#      of any package Socket has flagged, regardless of whether the exact
+#      @version is listed here.
+#   2. Org policy treats ANY version of the package roots listed above as
+#      suspect — pin a known-good prior version and open an incident ticket.
+#
+# DEVOP-560 launch checklist gates on either (a) the live Socket feed
+# integration landing OR (b) this file being hand-augmented with the full
+# 526-wave pins from the Socket export. Do not declare the IOC sweep
+# production-ready until one of those is complete.
