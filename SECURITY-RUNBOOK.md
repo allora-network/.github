@@ -344,9 +344,16 @@ notify them.
 
 **Audit blast radius**
 
-4. List secrets the pod could read:
+4. List secrets the pod could read. **Derive the ServiceAccount
+   from the pod YAML you captured in step 2**, not from the live
+   pod — by this point the pod is gone or rescheduled, and a live
+   lookup will fail or (worse) return the SA of a freshly-recreated
+   replacement that you may not have audited yet:
    ```bash
-   SA=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.serviceAccountName}')
+   # Read SA from the snapshot captured in step 2 (works after pod deletion).
+   # Requires yq (https://github.com/mikefarah/yq); fall back to grep if absent.
+   SA=$(yq '.spec.serviceAccountName' /tmp/$POD.yaml 2>/dev/null \
+        || grep -E '^\s*serviceAccountName:' /tmp/$POD.yaml | awk '{print $2}')
    kubectl auth can-i --list --as=system:serviceaccount:$NS:$SA
    kubectl -n "$NS" get secret -o name | xargs -I{} kubectl -n "$NS" describe {} | head
    ```
