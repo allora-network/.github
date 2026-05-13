@@ -353,7 +353,7 @@ notify them.
    # Read SA from the snapshot captured in step 2 (works after pod deletion).
    # Requires yq (https://github.com/mikefarah/yq); fall back to grep if absent.
    SA=$(yq '.spec.serviceAccountName' /tmp/$POD.yaml 2>/dev/null \
-        || grep -E '^\s*serviceAccountName:' /tmp/$POD.yaml | awk '{print $2}')
+        || grep -E '^[[:space:]]*serviceAccountName:' /tmp/$POD.yaml | awk '{print $2}')
    kubectl auth can-i --list --as=system:serviceaccount:$NS:$SA
    kubectl -n "$NS" get secret -o name | xargs -I{} kubectl -n "$NS" describe {} | head
    ```
