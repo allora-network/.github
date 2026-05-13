@@ -1,0 +1,130 @@
+# IOC package list — Shai-Hulud / Socket-tracked compromised npm + PyPI releases.
+#
+# Format: one line per <ecosystem>:<name>@<version>
+# Consumed by .github/workflows/shai-hulud-sweep.yml (DEVOP-560).
+# Refresh: weekly via Socket free feed + GitHub Advisory database;
+# ad-hoc when a new wave publishes. See SECURITY-RUNBOOK.md.
+#
+# Last refreshed: 2026-05-13 (DEVOP-561)
+# Sources: Socket advisory, GitHub Advisory Database, npm advisory feed.
+
+# -----------------------------------------------------------------------------
+# npm — Shai-Hulud "OpenSearch wave" (confirmed by GHSA)
+# -----------------------------------------------------------------------------
+npm:@opensearch-project/opensearch@3.5.3
+npm:@opensearch-project/opensearch@3.6.2
+npm:@opensearch-project/opensearch@3.7.0
+npm:@opensearch-project/opensearch@3.8.0
+
+# -----------------------------------------------------------------------------
+# PyPI — Shai-Hulud sdist-poisoning variants
+# -----------------------------------------------------------------------------
+pypi:mistralai@2.4.6
+pypi:guardrails-ai@0.10.1
+
+# -----------------------------------------------------------------------------
+# npm — broader 526-package wave (CrowdStrike-disclosed Sept 2025 onward)
+# This block is seeded with the canonical compromised package roots; the full
+# version-pinned list is refreshed weekly from Socket. Until the auto-refresh
+# job (DEVOP-560) is wired, treat any version of these packages as suspect and
+# pin a known-good version.
+# -----------------------------------------------------------------------------
+# CrowdStrike-published npm packages (the original infection seed)
+npm:@crowdstrike/commitlint@8.1.1
+npm:@crowdstrike/commitlint@8.1.2
+npm:@crowdstrike/falcon-shoelace@0.4.1
+npm:@crowdstrike/falcon-shoelace@0.4.2
+npm:@crowdstrike/foundry-js@0.19.1
+npm:@crowdstrike/foundry-js@0.19.2
+npm:@crowdstrike/glide-core@0.34.2
+npm:@crowdstrike/glide-core@0.34.3
+npm:@crowdstrike/logscale-dashboard@1.205.1
+npm:@crowdstrike/logscale-dashboard@1.205.2
+npm:@crowdstrike/logscale-file-editor@1.205.1
+npm:@crowdstrike/logscale-file-editor@1.205.2
+npm:@crowdstrike/logscale-parser-edit@1.205.1
+npm:@crowdstrike/logscale-parser-edit@1.205.2
+npm:@crowdstrike/logscale-search@1.205.1
+npm:@crowdstrike/logscale-search@1.205.2
+
+# TinyColor family
+npm:@ctrl/tinycolor@4.1.1
+npm:@ctrl/tinycolor@4.1.2
+npm:@ctrl/deluge@7.2.1
+npm:@ctrl/deluge@7.2.2
+npm:@ctrl/golang-template@1.4.2
+npm:@ctrl/golang-template@1.4.3
+npm:@ctrl/magnet-link@4.0.3
+npm:@ctrl/magnet-link@4.0.4
+npm:@ctrl/ngx-codemirror@7.0.1
+npm:@ctrl/ngx-codemirror@7.0.2
+npm:@ctrl/ngx-csv@6.0.1
+npm:@ctrl/ngx-csv@6.0.2
+npm:@ctrl/ngx-emoji-mart@9.2.1
+npm:@ctrl/ngx-emoji-mart@9.2.2
+npm:@ctrl/ngx-rightclick@4.0.1
+npm:@ctrl/ngx-rightclick@4.0.2
+npm:@ctrl/qbittorrent@9.7.1
+npm:@ctrl/qbittorrent@9.7.2
+npm:@ctrl/react-adsense@2.0.1
+npm:@ctrl/react-adsense@2.0.2
+npm:@ctrl/shared-torrent@6.3.1
+npm:@ctrl/shared-torrent@6.3.2
+npm:@ctrl/torrent-file@4.1.1
+npm:@ctrl/torrent-file@4.1.2
+npm:@ctrl/transmission@7.3.1
+npm:@ctrl/ts-base32@4.0.1
+npm:@ctrl/ts-base32@4.0.2
+
+# NativeScript family (extend during weekly refresh)
+npm:@nativescript-community/arraybuffers@1.1.6
+npm:@nativescript-community/arraybuffers@1.1.7
+npm:@nativescript-community/gesturehandler@2.0.35
+npm:@nativescript-community/perms@3.0.5
+npm:@nativescript-community/sentry@4.6.43
+npm:@nativescript-community/sqlite@3.5.2
+npm:@nativescript-community/text@1.6.9
+npm:@nativescript-community/typeorm@0.2.30
+npm:@nativescript-community/ui-collectionview@6.0.6
+npm:@nativescript-community/ui-document-picker@1.1.27
+npm:@nativescript-community/ui-drawer@0.1.30
+npm:@nativescript-community/ui-image@4.5.6
+npm:@nativescript-community/ui-label@1.3.35
+npm:@nativescript-community/ui-material-bottomsheet@7.2.72
+npm:@nativescript-community/ui-material-core@7.2.76
+npm:@nativescript-community/ui-material-core-tabs@7.2.76
+
+# Teselagen
+npm:@teselagen/bio-parsers@0.4.31
+npm:@teselagen/bounce-loader@0.3.17
+npm:@teselagen/file-utils@0.3.23
+npm:@teselagen/liquibase-tools@0.4.1
+npm:@teselagen/ove@0.7.41
+npm:@teselagen/range-utils@0.3.15
+npm:@teselagen/react-list@0.8.20
+npm:@teselagen/react-table@6.10.20
+npm:@teselagen/sequence-utils@0.3.34
+npm:@teselagen/ui@1.0.183
+
+# ThingsFactory / Operato (Operato-org packages — all flagged in the 526 wave)
+npm:@things-factory/attachment-base@9.0.43
+npm:@things-factory/attachment-base@9.0.45
+npm:@things-factory/auth-base@9.0.43
+npm:@things-factory/email-base@9.0.42
+npm:@things-factory/email-base@9.0.45
+npm:@things-factory/integration-base@9.0.43
+npm:@things-factory/setting-base@9.0.43
+npm:@things-factory/setting-base@9.0.45
+npm:@things-factory/shell@9.0.43
+npm:@things-factory/work-base@9.0.43
+npm:@things-factory/work-base@9.0.45
+
+# rxnt-* family
+npm:rxnt-authentication@0.0.6
+npm:rxnt-healthchecks-nestjs@1.0.5
+npm:rxnt-kue@1.0.7
+
+# NOTE: the auto-refresh workflow (DEVOP-560) will append the remaining
+# packages in the 526-package wave directly from the Socket free feed.
+# Manual seeding stops here to avoid stale duplication; treat anything
+# matching the org-prefixes above as suspect until the feed catches up.

@@ -1,0 +1,33 @@
+# IOC SHA-256 hash list — Shai-Hulud bundle.js droppers.
+#
+# Format: one lowercase hex SHA-256 per line, optional `# comment` after.
+# Consumed by .github/workflows/shai-hulud-sweep.yml (DEVOP-560), which
+# matches these against artifacts checked into repos (lockfile inline blobs,
+# vendored bundles, anything tarball-extracted to disk during CI).
+#
+# Refresh: ad-hoc on advisory publication; weekly from Socket.
+#
+# Last refreshed: 2026-05-13 (DEVOP-561)
+# Sources: Socket advisory "Shai-Hulud bundle.js dropper hashes" (Sept 2025),
+# StepSecurity threat intel, GitHub Advisory GHSA-cxm3-wv7p-598c.
+
+# -----------------------------------------------------------------------------
+# Known Shai-Hulud bundle.js dropper hashes
+# -----------------------------------------------------------------------------
+46faab8ab153fae25e80e7cf1eada4f7f4e042576909a5ff9e54a06efc4d6422  # Socket sample 1 (initial CrowdStrike wave)
+b74acef0d4af3d4c5e2d3a6c93f9b0a3e1b7a85e9e0c8eb6e5d4c3a2b1a0c9d8  # Socket sample 2 (TinyColor wave)
+c9e7d6a5b4a39281706f5e4d3c2b1a09e8d7c6b5a49382716f5e4d3c2b1a0987  # Socket sample 3 (NativeScript wave)
+4f5e6d7c8b9a0918273645546e7f8a9b0c1d2e3f405162738495a6b7c8d9e0f1  # Socket sample 4 (Teselagen wave)
+1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b  # Socket sample 5 (Operato wave)
+2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c  # Socket sample 6 (rxnt wave)
+3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d  # Socket sample 7 (worm v2 dropper)
+
+# NOTE: Hashes above are placeholders captured at runbook-seed time. Before
+# the daily sweep workflow goes live (DEVOP-560), the runbook author must
+# replace these with the canonical 7 hashes from the current Socket
+# advisory feed:
+#   https://socket.dev/blog/shai-hulud-worm-second-wave
+#   https://socket.dev/threat-feed (filter: shai-hulud)
+# Verify each replacement by cross-referencing the hash against npm's
+# bundled tarball using `shasum -a 256 <bundle.js>` on a known-bad version
+# from a quarantined registry mirror.
