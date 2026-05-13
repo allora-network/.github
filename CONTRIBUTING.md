@@ -10,6 +10,14 @@ If you're triaging a real or suspected compromise on your machine, **stop
 reading this file** and follow
 [`SECURITY-RUNBOOK.md`](./SECURITY-RUNBOOK.md) → Scenario A.
 
+> **Cross-doc link status.** This document links to
+> `SECURITY-RUNBOOK.md` (DEVOP-571) and the IOC seed files under
+> `.github/security/` (DEVOP-561). Those land in sibling PRs and may
+> 404 on `main` until the related PRs merge. If a link is broken at
+> the time you're reading this, check the open PRs on
+> [`allora-network/.github`](https://github.com/allora-network/.github/pulls)
+> or grep the repo (`git grep -l SECURITY-RUNBOOK`).
+
 ---
 
 ## TL;DR (new-joiner setup checklist)
