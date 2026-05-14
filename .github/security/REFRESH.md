@@ -31,6 +31,29 @@ stay current to be useful.
    new IOCs are picked up: `gh workflow run shai-hulud-sweep.yml --repo
    allora-network/.github`.
 
+## Refreshing the Datadog 2.0 snapshot
+
+The Shai-Hulud 2.0 (Nov 2025 wave) section of `ioc-packages.txt` is imported
+verbatim from Datadog's consolidated 7-vendor CSV. To refresh:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DataDog/indicators-of-compromise/main/shai-hulud-2.0/consolidated_iocs.csv -o /tmp/datadog-iocs.csv
+
+python3 - <<'PY'
+import csv
+with open('/tmp/datadog-iocs.csv') as f:
+    r = csv.reader(f); next(r)
+    for name, versions, _ in r:
+        for v in (x.strip() for x in versions.split(',') if x.strip()):
+            print(f"npm:{name}@{v}")
+PY
+```
+
+Replace the block under `# npm — Shai-Hulud 2.0 (Datadog consolidated snapshot…)`
+with the new output, bump "Snapshot: fetched YYYY-MM-DD", and PR as in the
+generic flow above. Do not edit the snapshot rows by hand — always
+re-import the full block so the file stays diff-able against upstream.
+
 ## Audit trail
 
 Every refresh PR must link the upstream advisory in the PR body. The
