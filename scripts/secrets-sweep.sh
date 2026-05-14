@@ -5,8 +5,11 @@
 # in `allora-network` and writes JSON reports per repo.
 #
 # Usage:
-#   export GH_TOKEN=<a read-only PAT with `repo` scope, NOT GH_READONLY_PAT
-#                    (which is org-wide and we're rotating per DEVOP-586)>
+#   export GH_TOKEN=<fine-grained PAT, resource owner = allora-network,
+#                    all repositories, Contents:read + Metadata:read only.
+#                    Do NOT use a classic `repo`-scoped PAT (read+write),
+#                    and NOT GH_READONLY_PAT (org-wide, being rotated per
+#                    DEVOP-586). See security/SECRETS-SWEEP-RUNBOOK.md.>
 #   bash scripts/secrets-sweep.sh
 #
 # Run inside an ephemeral VM/container with NO other secrets present.

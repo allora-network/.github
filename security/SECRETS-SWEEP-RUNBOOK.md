@@ -12,7 +12,17 @@ This is the compensating control for not buying GitHub Advanced Security: a one-
 ## Pre-flight
 
 - [ ] Stand up a **single-purpose** VM or container. No other Allora credentials present. No SSH keys for production. No 1Password Connect. Just `gh`, `trufflehog`, `gitleaks`, `jq`, `git`.
-- [ ] Set `GH_TOKEN` to a read-only personal PAT scoped to `repo`. **Do not use `GH_READONLY_PAT`** — that org secret is being rotated per DEVOP-586.
+- [ ] Set `GH_TOKEN` to a **fine-grained personal access token** with:
+    - **Resource owner:** `allora-network`
+    - **Repository access:** *All repositories* (the sweep enumerates the full org)
+    - **Repository permissions** (read-only, nothing else):
+      - `Contents: Read-only`
+      - `Metadata: Read-only`
+    - No account permissions. No write permissions of any kind.
+
+    Do **not** use a classic PAT with the `repo` scope — that scope is read+write on every accessible repo and is overprovisioned for a sweep that must never write. Do **not** use `GH_READONLY_PAT` — that org secret is being rotated per DEVOP-586.
+
+    > A long-lived org-scoped fine-grained PAT is being provisioned under DEVOP-577 for the scheduled re-sweep workflow. Until that lands, generate a *personal* fine-grained PAT scoped per the above for the baseline run, and delete it immediately after triage.
 - [ ] Confirm disk: ~5 GB free for clones across 225 repos.
 
 ## Run
