@@ -78,12 +78,24 @@ for repo in "${REPOS[@]}"; do
     TRUFFLEHOG_ERRORS+=("$repo:$th_rc")
   fi
 
-  # gitleaks: needs a local clone (bare is fine, faster)
+  # gitleaks: needs a local clone (bare is fine, faster).
+  # On re-runs (monthly cadence) we must refresh existing clones —
+  # otherwise gitleaks silently scans stale history and misses any
+  # commits pushed since the last sweep, which is asymmetric with
+  # trufflehog (which always scans the remote directly) and produces
+  # exactly the wrong failure mode: a "clean" gitleaks row for a repo
+  # that gained a leaked credential since the last sweep.
   bare="$CLONES/$repo.git"
   if [ ! -d "$bare" ]; then
     if ! git clone --quiet --bare "https://github.com/$ORG/$repo" "$bare"; then
       echo "  clone failed; recording gitleaks scan error"
       GITLEAKS_ERRORS+=("$repo:clone-failed")
+      continue
+    fi
+  else
+    if ! git --git-dir="$bare" fetch --quiet --prune --force origin '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'; then
+      echo "  fetch failed on cached clone; recording gitleaks scan error"
+      GITLEAKS_ERRORS+=("$repo:fetch-failed")
       continue
     fi
   fi
