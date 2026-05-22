@@ -60,7 +60,7 @@ exercise clock starts when the first participant types `ack`.
 | **Executor** | A third DevOps engineer | Runs every `gh`, `npm`, `kubectl`, and `cosign` command the lead asks for. Pastes output back to the channel. Does NOT make decisions; if the lead's instruction is ambiguous, asks. |
 | **Backend rep** | One backend engineer | Represents the consumer-of-this-package perspective. When the communicator drafts the downstream notification, the backend rep reads it as if it landed in their inbox and pushes back on anything unclear. |
 | **Frontend rep** | One frontend engineer | Same, but for the frontend-side dependency story. (`eliza-allora-plugin` is a dev-tool; both BE and FE consume.) |
-| **Founder observer** | One of the founders | Silent. Their job is to confirm that the team can run this without exec involvement during the actual incident. They DO NOT participate. |
+| **Founder observer** | One of the founders | Silent observer by default. Their job is to confirm the team can run this without exec involvement during a real incident, so they DO NOT participate in decisions or commentary. The one exception: the runbook's "destructive action" gate (full-package `unpublish`/delete) requires the on-call founder's written approval per `SECURITY-RUNBOOK.md` §5. If the team reaches for that gate they may break silence to ack/deny — and only for that. Otherwise they take notes. |
 
 If someone is missing on the day, **postpone**. Skipping a role to run
 the exercise on schedule defeats the purpose; reschedule rather than
@@ -101,9 +101,13 @@ Runbook §5 step 1.
   npm. Executor types the exact `npm deprecate` invocation; lead
   confirms before executor "runs" it (the executor pastes the command
   in chat; we don't actually run it).
-- [ ] Lead decides whether to attempt `npm unpublish` (within the 72-
-  hour window). The decision must be made jointly with the on-call
-  founder (silent observer notes whether they were consulted in time).
+- [ ] Lead decides whether to attempt `npm unpublish` of the bad
+  versions (within the 72-hour window). This is a per-version
+  unpublish, NOT a full-package delete; the runbook scopes the
+  founder-approval gate to full-package deletion only, so the lead
+  owns this call. The founder observer notes whether the lead
+  surfaces the decision clearly in channel rather than slipping it
+  past unannounced.
 - [ ] Executor "yanks" the version on PyPI via the web UI (described
   in chat). N/A for this scenario but let's verify the team remembers
   it's npm-only here.
@@ -112,7 +116,10 @@ Runbook §5 step 1.
   Dockerfiles + package.jsons across the org).
 
 **Success:** within 10 minutes, both bad versions are deprecated and
-the unpublish decision has been made (yes/no) with founder buy-in.
+the unpublish decision (yes/no) has been made and announced in
+channel by the lead. Founder approval is NOT required for the
+per-version unpublish call; it would only be required if the team
+escalated to a full-package delete, which the runbook forbids here.
 
 **Failure mode:** the team tries to *delete* the package entirely
 rather than deprecate-and-unpublish. The runbook explicitly forbids
