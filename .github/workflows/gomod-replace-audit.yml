@@ -1,0 +1,426 @@
+name: Go.mod Replace-Directive Audit
+
+# Weekly org-wide audit of `replace` directives in every allora-network Go
+# module. Reference: DEVOP-617. Complements the deeper DEVOP-560 daily
+# Shai-Hulud IOC sweep — this is a lighter no-clone Contents-API pass that
+# can scale to all org repos on a weekly cadence without re-cloning them.
+#
+# Detects the Go-side Shai-Hulud vector: a `replace` directive whose RHS
+# points outside the org's canonical trusted-host allowlist (a compromised
+# go.mod can silently redirect a legitimate import to an attacker fork).
+#
+# Outputs:
+#   - clean run:           no-op (no issue update, no Slack page).
+#   - non-allowlisted hit: append to / open rolling issue labelled
+#                          `gomod-replace-audit` and (if configured)
+#                          page Slack via `SLACK_SECURITY_WEBHOOK`.
+#
+# Humans drive close/reopen of the rolling issue so triage state survives
+# weekly runs.
+
+on:
+  schedule:
+    # 05:17 UTC every Monday — off-peak + off-minute to dodge GitHub
+    # Actions cron contention spikes on whole-hour boundaries, and
+    # offset from the daily Shai-Hulud sweep (04:07 UTC) so the two
+    # don't compete for the same minute-zero scheduler slot.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize concurrent runs so a manual `workflow_dispatch` while the
+# weekly cron is mid-audit can't race on the rolling issue / Slack page.
+concurrency:
+  group: gomod-replace-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit allora-network for suspicious go.mod replaces
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ORG: allora-network
+      ROLLING_LABEL: gomod-replace-audit
+      # Canonical trusted-host allowlist. MUST match
+      # scripts/shai-hulud-ioc-sweep.sh#GO_TRUSTED_HOSTS and
+      # shai-hulud-defense REFERENCE.md §Go specifics — keep in lockstep.
+      # Boundary `(/|$)` prevents lookalike paths (e.g.
+      # `github.com/cosmosmalicious/...` matching `github.com/cosmos`).
+      GO_TRUSTED_HOSTS_RE: 'github\.com/(allora-network|cosmos|ethereum|fluxcd)|gopkg\.in|google\.golang\.org|go\.uber\.org|go\.opentelemetry\.io|k8s\.io|sigs\.k8s\.io'
+      # Prefer a dedicated org-read PAT/App token when provisioned —
+      # required to enumerate private repos. Falls back to the workflow's
+      # default GITHUB_TOKEN, which can only see public org repos;
+      # `gh search code` will simply omit private hits in that mode, so
+      # the partial-coverage state is visible in the audit log (no
+      # silent false-clean). Aligned with DEVOP-560's pattern.
+      GH_TOKEN: ${{ secrets.GH_ORG_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout .github repo (allowlist is sourced from env above)
+        # SHA pin: actions/checkout v4.2.2 (Oct 2024). Matches the pin
+        # used by .github/workflows/shai-hulud-sweep.yml (DEVOP-560) and
+        # ci-workflows-private hardened reusable workflows.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Verify required tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh --version
+          jq --version
+          awk --version | head -1 || true
+          base64 --version | head -1 || true
+
+      - name: Enumerate org Go modules
+        id: enumerate
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/gomod-audit
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          # `gh search code` returns repo + file path tuples. Some repos
+          # have multiple go.mod files (monorepo sub-modules); the dedup
+          # happens on the `repo<TAB>path` pair, not on `repo` alone.
+          gh search code --owner "$ORG" 'filename:go.mod' --limit 200 \
+            --json repository,path \
+            --jq '.[] | "\(.repository.nameWithOwner)\t\(.path)"' \
+            | sort -u > "$OUTPUT_DIR/paths.tsv"
+          count="$(wc -l < "$OUTPUT_DIR/paths.tsv" | tr -d ' ')"
+          echo "Discovered $count <repo,path> tuples."
+          {
+            echo "paths_file=$OUTPUT_DIR/paths.tsv"
+            echo "output_dir=$OUTPUT_DIR"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and audit each go.mod
+        id: audit
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ steps.enumerate.outputs.output_dir }}
+          PATHS_FILE: ${{ steps.enumerate.outputs.paths_file }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUTPUT_DIR/gomods"
+          : > "$OUTPUT_DIR/audit.tsv"
+          : > "$OUTPUT_DIR/fetch-failures.tsv"
+          printf 'repo\tpath\tline_no\tlhs\trhs\tclassification\toriginal_line\n' \
+            > "$OUTPUT_DIR/audit.tsv"
+
+          while IFS=$'\t' read -r repo path; do
+            [ -z "$repo" ] && continue
+            safe="$(printf '%s' "$repo/$path" | tr '/' '_')"
+            gomod="$OUTPUT_DIR/gomods/$safe"
+            # Use `gh api` to fetch the contents-API JSON, jq out the
+            # base64 `.content` field, decode. A missing/empty repo or
+            # a moved default branch is a fetch failure, not a clean
+            # audit — record it so it surfaces in the rolling issue.
+            if ! gh api "repos/$repo/contents/$path" --jq '.content' 2>/dev/null \
+                 | base64 -d > "$gomod" 2>/dev/null \
+                 || [ ! -s "$gomod" ]; then
+              printf '%s\t%s\n' "$repo" "$path" >> "$OUTPUT_DIR/fetch-failures.tsv"
+              rm -f "$gomod"
+              continue
+            fi
+
+            # Awk extractor — same logic as shai-hulud-defense REFERENCE.md
+            # §Go specifics + scripts/shai-hulud-ioc-sweep.sh. Handles
+            # both `replace LHS => RHS vX` single-line form and
+            # `replace ( ... )` block form. Strips trailing version
+            # from RHS so the classification gate sees the bare module
+            # path.
+            awk -v repo="$repo" -v path="$path" '
+              /^[[:space:]]*replace[[:space:]]*\(/ { inblock=1; next }
+              inblock && /^[[:space:]]*\)/        { inblock=0; next }
+              /^[[:space:]]*replace[[:space:]]/ || inblock {
+                n = index($0, "=>")
+                if (n == 0) next
+                lhs = substr($0, 1, n - 1)
+                rhs = substr($0, n + 2)
+                sub(/^[[:space:]]*replace[[:space:]]+/, "", lhs)
+                sub(/^[[:space:]]+/, "", lhs); sub(/[[:space:]]+$/, "", lhs)
+                sub(/[[:space:]]+v[0-9].*$/, "", lhs)
+                sub(/^[[:space:]]+/, "", rhs); sub(/[[:space:]]+v[0-9].*$/, "", rhs)
+                sub(/[[:space:]]+$/, "", rhs)
+                if (rhs == "") next
+                original=$0
+                gsub(/\t/, " ", original)
+                printf "%s\t%s\t%d\t%s\t%s\t%s\n", repo, path, NR, lhs, rhs, original
+              }
+            ' "$gomod" \
+            | while IFS=$'\t' read -r r p line_no lhs rhs orig; do
+                case "$rhs" in
+                  ./*|../*)
+                    class="legitimate-local-relative" ;;
+                  /*)
+                    class="investigate-absolute" ;;
+                  *)
+                    if printf '%s\n' "$rhs" | grep -qE "^($GO_TRUSTED_HOSTS_RE)(/|$)"; then
+                      class="legitimate-allowlisted-host"
+                    elif [ "$lhs" = "$rhs" ]; then
+                      # Same-path version pin (LHS module path == RHS
+                      # module path). Structurally cannot redirect to an
+                      # attacker fork — the RHS is the identical upstream
+                      # module, just forced to a specific version. Safe;
+                      # the host-allowlist filter alone would over-flag
+                      # this and bury real redirect signals. Distinct
+                      # class so future audits don't re-litigate it.
+                      class="legitimate-version-pin"
+                    else
+                      class="SUSPICIOUS"
+                    fi
+                    ;;
+                esac
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                  "$r" "$p" "$line_no" "$lhs" "$rhs" "$class" "$orig" \
+                  >> "$OUTPUT_DIR/audit.tsv"
+              done
+          done < "$PATHS_FILE"
+
+          # Counts. SUSPICIOUS + investigate-absolute are IOC-grade.
+          total=$(($(wc -l < "$OUTPUT_DIR/audit.tsv") - 1))
+          suspicious=$(awk -F'\t' '$6=="SUSPICIOUS" || $6=="investigate-absolute"' \
+            "$OUTPUT_DIR/audit.tsv" | wc -l | tr -d ' ')
+          fetch_fails=$(wc -l < "$OUTPUT_DIR/fetch-failures.tsv" | tr -d ' ')
+          {
+            echo "total_directives=$total"
+            echo "suspicious=$suspicious"
+            echo "fetch_failures=$fetch_fails"
+            echo "audit_file=$OUTPUT_DIR/audit.tsv"
+            echo "fetch_failures_file=$OUTPUT_DIR/fetch-failures.tsv"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "# go.mod replace-directive audit"
+            echo
+            echo "**Run:** $(date -u)"
+            echo "**Org:** $ORG"
+            echo "**Modules scanned:** ${{ steps.enumerate.outputs.count }}"
+            echo "**Replace directives found:** $total"
+            echo "**Fetch failures:** $fetch_fails"
+            echo "**SUSPICIOUS (incident-grade):** $suspicious"
+            echo
+            if [ "$suspicious" -gt 0 ]; then
+              echo "## SUSPICIOUS findings — INVOKE INCIDENT RESPONSE"
+              echo
+              echo '```'
+              awk -F'\t' 'NR==1 || $6=="SUSPICIOUS" || $6=="investigate-absolute"' \
+                "$OUTPUT_DIR/audit.tsv" | column -t -s $'\t'
+              echo '```'
+              echo
+            fi
+            if [ "$total" -gt 0 ]; then
+              echo "## All replace directives (full audit)"
+              echo
+              echo '```'
+              column -t -s $'\t' < "$OUTPUT_DIR/audit.tsv"
+              echo '```'
+            fi
+            if [ "$fetch_fails" -gt 0 ]; then
+              echo
+              echo "## Fetch failures (operational — review)"
+              echo
+              echo '```'
+              cat "$OUTPUT_DIR/fetch-failures.tsv"
+              echo '```'
+            fi
+          } > "$OUTPUT_DIR/summary.md"
+
+          echo "::group::Audit summary"
+          cat "$OUTPUT_DIR/summary.md"
+          echo "::endgroup::"
+          echo "summary_file=$OUTPUT_DIR/summary.md" >> "$GITHUB_OUTPUT"
+
+      - name: Upload audit artifacts
+        if: always() && steps.audit.outputs.audit_file != ''
+        # SHA pin: actions/upload-artifact v4.4.3 (Oct 2024). Same pin
+        # as DEVOP-560 sweep workflow.
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: gomod-replace-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.audit.outputs.audit_file }}
+            ${{ steps.audit.outputs.fetch_failures_file }}
+            ${{ steps.audit.outputs.summary_file }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Update rolling issue on any non-clean run
+        # Non-clean here means: SUSPICIOUS finding OR fetch failure. A
+        # clean audit (no findings, all repos fetched) leaves the issue
+        # alone. Humans drive close/reopen so triage state persists.
+        if: steps.audit.outputs.suspicious != '0' || steps.audit.outputs.fetch_failures != '0'
+        shell: bash
+        env:
+          SUMMARY_PATH: ${{ steps.audit.outputs.summary_file }}
+          SUSPICIOUS: ${{ steps.audit.outputs.suspicious }}
+          FETCH_FAILS: ${{ steps.audit.outputs.fetch_failures }}
+          # Issue ops scoped to THIS repo only — the workflow's default
+          # GITHUB_TOKEN with `issues: write` is sufficient. A wider
+          # GH_ORG_READ_TOKEN (used above for enumeration) may or may
+          # not include issues:write here; keep this scoped narrow.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$SUSPICIOUS" != "0" ]; then
+            grade="SUSPICIOUS findings (incident-grade)"
+          else
+            grade="fetch failures only (operational)"
+          fi
+          {
+            echo "### Audit run — $ts"
+            echo
+            echo "- **Result:** $grade"
+            echo "- **SUSPICIOUS:** $SUSPICIOUS"
+            echo "- **Fetch failures:** $FETCH_FAILS"
+            echo "- **Run:** $run_url"
+            echo "- **Trigger:** \`${GITHUB_EVENT_NAME}\`"
+            echo
+            # Summary may contain attacker-controllable strings from
+            # scanned go.mod content (module paths, version strings).
+            # Strip characters that could escape the code fence or
+            # inject markdown/HTML; the uploaded audit.tsv artifact is
+            # the canonical un-sanitized source for forensic review.
+            echo '```'
+            tr -d '`<>|*_' < "$SUMMARY_PATH"
+            echo '```'
+          } > /tmp/audit-comment.md
+
+          # Find oldest open rolling issue with our label (newest gets
+          # surfaced by default; use `--search` with `sort:created-asc`
+          # so a long-running triage thread stays canonical even if a
+          # duplicate gets filed). `gh issue list` does not expose
+          # `--sort`; the search query is the supported lever.
+          existing="$(gh issue list \
+            --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            echo "Appending to existing rolling issue #$existing"
+            gh issue comment "$existing" --body-file /tmp/audit-comment.md
+          else
+            echo "Creating new rolling issue (label=$ROLLING_LABEL)"
+            # `--force` upserts the label (idempotent — safe to run on
+            # every cold-start of the rolling-issue cycle).
+            gh label create "$ROLLING_LABEL" \
+              --description "Weekly go.mod replace-directive audit findings (DEVOP-617)" \
+              --color D93F0B \
+              --force >/dev/null 2>&1 || true
+            title="[gomod-replace-audit] rolling findings — $(date -u +%Y-%m)"
+            gh issue create \
+              --label "$ROLLING_LABEL" \
+              --title "$title" \
+              --body-file /tmp/audit-comment.md
+          fi
+
+      - name: Page Slack on SUSPICIOUS findings
+        # Only SUSPICIOUS findings page Slack. Fetch failures only
+        # update the rolling issue — those are worth review but not
+        # incident-grade. Cleanly no-op if the webhook secret is
+        # unset (early exit) so an org without it doesn't get a red
+        # weekly workflow.
+        if: always() && steps.audit.outputs.suspicious != '0'
+        shell: bash
+        env:
+          SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
+          SUMMARY_PATH: ${{ steps.audit.outputs.summary_file }}
+          SUSPICIOUS: ${{ steps.audit.outputs.suspicious }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_SECURITY_WEBHOOK:-}" ]; then
+            echo "::warning::SLACK_SECURITY_WEBHOOK secret not set; skipping Slack page."
+            exit 0
+          fi
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Cap to ~2.8KB so the Slack block stays inside the 3000-char
+          # per-block limit after JSON escaping. Strip characters that
+          # could escape the Slack code fence or inject block-kit mrkdwn.
+          # audit.tsv (preserved in the uploaded artifact) is the
+          # canonical un-sanitized source for forensic review.
+          summary="$(head -c 6000 "$SUMMARY_PATH" 2>/dev/null || echo 'summary unavailable')"
+          summary="$(printf '%s' "$summary" | tr -d '`<>|*_')"
+          payload="$(jq -nc \
+            --arg run "$run_url" \
+            --arg org "$ORG" \
+            --arg n "$SUSPICIOUS" \
+            --arg summary "$summary" \
+            '{
+              text: (":rotating_light: go.mod replace audit — " + $n + " SUSPICIOUS finding(s) in " + $org),
+              blocks: [
+                { type: "header",
+                  text: { type: "plain_text",
+                          text: "go.mod replace-directive audit — SUSPICIOUS findings" } },
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: (":rotating_light: *" + $n + " SUSPICIOUS go.mod replace directive(s) — " + $org + "*\n<" + $run + "|Open workflow run>") } },
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: ("```\n" + ($summary | .[0:2800]) + "\n```") } }
+              ]
+            }')"
+          # Retry on transient HTTP failures (5s, 15s, 45s). Honor
+          # Slack's Retry-After on HTTP 429. Same retry shape as the
+          # DEVOP-560 sweep Slack page step.
+          http_code=000
+          attempt=0
+          max_attempts=3
+          delays=(5 15 45)
+          while [ "$attempt" -lt "$max_attempts" ]; do
+            attempt=$((attempt + 1))
+            http_code="$(curl -sS --connect-timeout 5 --max-time 15 \
+              -X POST -H 'Content-Type: application/json' \
+              --data "$payload" \
+              -D /tmp/slack.headers \
+              -o /tmp/slack.out \
+              -w '%{http_code}' \
+              "$SLACK_SECURITY_WEBHOOK" || echo 000)"
+            if [ "$http_code" = "200" ]; then
+              break
+            fi
+            case "$http_code" in
+              000|408|429|5*) transient=1 ;;
+              *)              transient=0 ;;
+            esac
+            if [ "$transient" -ne 1 ] || [ "$attempt" -ge "$max_attempts" ]; then
+              break
+            fi
+            sleep_for="${delays[$((attempt - 1))]}"
+            retry_after="$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/ {gsub(/[\r\n]/,"",$2); print $2; exit}' /tmp/slack.headers 2>/dev/null || true)"
+            if [ "$http_code" = "429" ] && [ -n "$retry_after" ] && [ "$retry_after" -gt "$sleep_for" ] 2>/dev/null; then
+              sleep_for="$retry_after"
+            fi
+            echo "::warning::Slack webhook attempt $attempt/$max_attempts returned HTTP $http_code; retrying in ${sleep_for}s."
+            sleep "$sleep_for"
+          done
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Slack webhook returned HTTP $http_code after $attempt attempt(s): $(head -c 500 /tmp/slack.out 2>/dev/null || true)"
+            exit 1
+          fi
+          echo "Slack page delivered (HTTP $http_code, attempts=$attempt)."
+
+      - name: Final run summary
+        if: always()
+        shell: bash
+        env:
+          SUSPICIOUS: ${{ steps.audit.outputs.suspicious }}
+          FETCH_FAILS: ${{ steps.audit.outputs.fetch_failures }}
+          TOTAL: ${{ steps.audit.outputs.total_directives }}
+        run: |
+          if [ "${SUSPICIOUS:-0}" != "0" ]; then
+            echo "::warning::Audit found ${SUSPICIOUS} SUSPICIOUS replace directive(s). See rolling issue + Slack."
+          elif [ "${FETCH_FAILS:-0}" != "0" ]; then
+            echo "::warning::Audit completed with ${FETCH_FAILS} fetch failure(s). See rolling issue."
+          else
+            echo "::notice::Audit clean — ${TOTAL:-0} replace directives scanned, all classified legitimate."
+          fi
