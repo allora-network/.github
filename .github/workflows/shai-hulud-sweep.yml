@@ -1,0 +1,264 @@
+name: Shai-Hulud IOC Sweep
+
+# Daily org-wide sweep for Shai-Hulud indicators of compromise.
+# Reference: DEVOP-560. Canonical detection logic lives in
+# scripts/shai-hulud-ioc-sweep.sh (vendored from
+# allora-network/skills @ skills/shai-hulud-defense/scripts/shai-hulud-ioc-sweep.sh
+# — see the file header for refresh procedure / pinned commit).
+#
+# Outputs:
+#   - clean (script exit 0):  no-op (no issue update, no Slack page).
+#   - operational (exit 2):   append a comment to the rolling issue labelled
+#                             `shai-hulud-sweep`, or open a new one if none.
+#   - IOC-grade (exit 1):     same rolling-issue update + page Slack via the
+#                             `SLACK_SECURITY_WEBHOOK` org secret.
+#
+# Humans drive close-and-reopen of the rolling issue so triage state is
+# preserved across runs; the workflow never auto-closes.
+
+on:
+  schedule:
+    # 04:07 UTC daily — off-peak + off-minute to dodge GitHub Actions cron
+    # contention spikes on whole-hour boundaries.
+    - cron: '7 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize concurrent runs so a manual `workflow_dispatch` while the daily
+# cron is mid-sweep can't race on the rolling issue / Slack page. Never
+# cancel an in-progress sweep — partial scans are more dangerous than
+# delayed ones (they false-clean unscanned repos).
+concurrency:
+  group: shai-hulud-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Sweep allora-network for IOCs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ORG: allora-network
+      ROLLING_LABEL: shai-hulud-sweep
+      # Prefer a dedicated `GH_ORG_READ_TOKEN` secret (fine-grained PAT or
+      # GitHub App token with `read:org` + repo:read) when provisioned —
+      # required for private-repo enumeration and member exfil search. Falls
+      # back to the workflow's default GITHUB_TOKEN, which can only see
+      # public org repos and lacks `read:org`; in that mode the script
+      # emits `check_skipped` operational findings for the members API so
+      # the partial-coverage state is visible in the rolling issue, never
+      # silently false-cleaned. See docs/plans/2026-05-25-devop-560-*.md.
+      GH_TOKEN: ${{ secrets.GH_ORG_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout .github repo (for IOC lists + sweep script)
+        # SHA pin: actions/checkout v4.2.2 (Oct 2024). Matches the pin used
+        # in allora-network/ci-workflows-private hardened reusable workflows.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Verify required tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh --version
+          jq --version
+          sha256sum --version | head -1
+          git --version
+
+      - name: Run Shai-Hulud IOC sweep
+        id: sweep
+        shell: bash
+        # The script exits 0 (clean) / 1 (IOC) / 2 (operational). We deliberately
+        # do NOT let a 1/2 exit fail the step — those are reported via the
+        # rolling-issue + Slack page steps below, not by failing the workflow
+        # (which would obscure the structured output behind a red ❌ and break
+        # the daily-cron observability story). Only true infra errors should
+        # fail this step.
+        run: |
+          set -uo pipefail
+          chmod +x scripts/shai-hulud-ioc-sweep.sh
+          # Pin OUTPUT_DIR so subsequent steps can find findings.json and
+          # summary.md by a known path. Default of $(date) would change
+          # between steps.
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/.shai-hulud-sweep"
+          export OUTPUT_DIR
+          mkdir -p "$OUTPUT_DIR"
+          set +e
+          ./scripts/shai-hulud-ioc-sweep.sh "$ORG" \
+            .github/security/ioc-packages.txt \
+            .github/security/ioc-hashes.txt
+          rc=$?
+          set -e
+          {
+            echo "rc=$rc"
+            echo "output_dir=$OUTPUT_DIR"
+            echo "summary_path=${OUTPUT_DIR}/summary.md"
+            echo "findings_path=${OUTPUT_DIR}/findings.json"
+          } >> "$GITHUB_OUTPUT"
+          echo "Sweep exit code: $rc"
+          if [ -s "${OUTPUT_DIR}/summary.md" ]; then
+            echo "::group::Sweep summary"
+            cat "${OUTPUT_DIR}/summary.md"
+            echo "::endgroup::"
+          else
+            echo "::warning::sweep produced no summary.md — the script likely failed before aggregation."
+          fi
+          # Step succeeds for rc in {0,1,2}. Anything else is treated as
+          # infrastructure failure (script crashed, missing tool, etc.) and
+          # surfaces as a red workflow run for human attention.
+          case "$rc" in
+            0|1|2) exit 0 ;;
+            *)     exit "$rc" ;;
+          esac
+
+      - name: Upload sweep artifacts (findings + forensic evidence)
+        if: always() && steps.sweep.outputs.output_dir != ''
+        # SHA pin: actions/upload-artifact v4.4.3 (Oct 2024). Preserves the
+        # forensic evidence directory (clones of any repo that produced an
+        # IOC-grade finding) for 30 days so humans can inspect the matched
+        # file without re-cloning (point-in-time evidence may have moved).
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: shai-hulud-sweep-${{ github.run_id }}
+          path: ${{ steps.sweep.outputs.output_dir }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Update rolling issue with findings
+        # Update the rolling issue on any non-clean run (operational OR IOC).
+        # Clean runs (exit 0) leave the issue alone — humans drive close /
+        # reopen so triage state survives across daily runs.
+        if: steps.sweep.outputs.rc == '1' || steps.sweep.outputs.rc == '2'
+        shell: bash
+        env:
+          SWEEP_RC: ${{ steps.sweep.outputs.rc }}
+          SUMMARY_PATH: ${{ steps.sweep.outputs.summary_path }}
+          # Issue ops are scoped to THIS repo (allora-network/.github) and
+          # only need the workflow's own GITHUB_TOKEN with `issues: write`.
+          # A wider GH_ORG_READ_TOKEN (used above for org enumeration) may
+          # or may not include issues:write here — keep this scoped narrow.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$SUMMARY_PATH" ]; then
+            echo "::warning::sweep summary missing or empty at $SUMMARY_PATH; skipping issue update."
+            exit 0
+          fi
+
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$SWEEP_RC" = "1" ]; then
+            grade="IOC findings (incident-grade)"
+          else
+            grade="operational findings only"
+          fi
+
+          {
+            echo "### Sweep run — $ts"
+            echo
+            echo "- **Result:** $grade (script exit \`$SWEEP_RC\`)"
+            echo "- **Run:** $run_url"
+            echo "- **Trigger:** \`${GITHUB_EVENT_NAME}\`"
+            echo
+            cat "$SUMMARY_PATH"
+          } > /tmp/sweep-comment.md
+
+          # Find an existing open rolling issue with our label, oldest first
+          # (so a long-running incident issue stays the canonical thread even
+          # if someone files a duplicate later).
+          existing="$(gh issue list \
+            --label "$ROLLING_LABEL" \
+            --state open \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            echo "Appending to existing rolling issue #$existing"
+            gh issue comment "$existing" --body-file /tmp/sweep-comment.md
+          else
+            echo "Creating new rolling issue (label=$ROLLING_LABEL)"
+            # `gh label create --force` upserts the label (no-op if it exists
+            # with matching properties; resets color/description otherwise).
+            # Idempotency makes this safe to run on every cold-start of the
+            # rolling-issue cycle without a preflight `gh label list` check.
+            gh label create "$ROLLING_LABEL" \
+              --description "Daily Shai-Hulud IOC sweep findings (DEVOP-560)" \
+              --color B60205 \
+              --force >/dev/null 2>&1 || true
+            title="[shai-hulud-sweep] rolling findings — $(date -u +%Y-%m)"
+            gh issue create \
+              --label "$ROLLING_LABEL" \
+              --title "$title" \
+              --body-file /tmp/sweep-comment.md
+          fi
+
+      - name: Page Slack on IOC findings
+        # Only IOC-grade findings (exit 1) page Slack. Operational findings
+        # (exit 2) only update the rolling issue — those are worth review but
+        # not incident-grade and shouldn't generate after-hours pages.
+        # No-ops cleanly if SLACK_SECURITY_WEBHOOK is unset (early exit, not
+        # a failure) so an org without the secret provisioned doesn't get a
+        # red daily workflow.
+        if: steps.sweep.outputs.rc == '1'
+        shell: bash
+        env:
+          SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
+          SUMMARY_PATH: ${{ steps.sweep.outputs.summary_path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_SECURITY_WEBHOOK:-}" ]; then
+            echo "::warning::SLACK_SECURITY_WEBHOOK secret is not set; skipping Slack page."
+            exit 0
+          fi
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Cap summary at ~2.8 KB so the Slack block stays inside the 3000-char
+          # per-block limit even after JSON escaping headroom.
+          summary="$(head -c 6000 "$SUMMARY_PATH" 2>/dev/null || echo 'summary unavailable')"
+          # jq builds the payload so embedded quotes/newlines/unicode in the
+          # summary can't break the JSON or inject Slack block-kit markup.
+          payload="$(jq -nc \
+            --arg run "$run_url" \
+            --arg org "$ORG" \
+            --arg summary "$summary" \
+            '{
+              text: (":rotating_light: Shai-Hulud IOC findings — " + $org),
+              blocks: [
+                { type: "header",
+                  text: { type: "plain_text", text: "Shai-Hulud IOC sweep — incident-grade findings" } },
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: (":rotating_light: *Shai-Hulud IOC findings — " + $org + "*\n<" + $run + "|Open workflow run>") } },
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: ("```\n" + ($summary | .[0:2800]) + "\n```") } }
+              ]
+            }')"
+          http_code="$(curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "$payload" \
+            -o /tmp/slack.out \
+            -w '%{http_code}' \
+            "$SLACK_SECURITY_WEBHOOK" || echo 000)"
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Slack webhook returned HTTP $http_code: $(head -c 500 /tmp/slack.out 2>/dev/null || true)"
+            exit 1
+          fi
+          echo "Slack page delivered (HTTP $http_code)."
+
+      - name: Final run summary
+        if: always()
+        shell: bash
+        env:
+          SWEEP_RC: ${{ steps.sweep.outputs.rc }}
+        run: |
+          case "${SWEEP_RC:-x}" in
+            0) echo "::notice::Sweep clean (no findings)." ;;
+            1) echo "::warning::Sweep produced IOC-grade findings. See rolling issue + Slack." ;;
+            2) echo "::warning::Sweep produced operational findings only. See rolling issue." ;;
+            *) echo "::error::Sweep failed to produce a meaningful exit code (rc='${SWEEP_RC:-unset}')." ;;
+          esac
