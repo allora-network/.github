@@ -88,6 +88,7 @@ jobs:
           OUTPUT_DIR="${GITHUB_WORKSPACE}/.shai-hulud-sweep"
           export OUTPUT_DIR
           mkdir -p "$OUTPUT_DIR"
+          echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
           set +e
           ./scripts/shai-hulud-ioc-sweep.sh "$ORG" \
             .github/security/ioc-packages.txt \
@@ -96,7 +97,6 @@ jobs:
           set -e
           {
             echo "rc=$rc"
-            echo "output_dir=$OUTPUT_DIR"
             echo "summary_path=${OUTPUT_DIR}/summary.md"
             echo "findings_path=${OUTPUT_DIR}/findings.json"
           } >> "$GITHUB_OUTPUT"
@@ -124,7 +124,7 @@ jobs:
         # file without re-cloning (point-in-time evidence may have moved).
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
-          name: shai-hulud-sweep-${{ github.run_id }}
+          name: shai-hulud-sweep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.sweep.outputs.output_dir }}
           if-no-files-found: warn
           retention-days: 30
@@ -205,7 +205,7 @@ jobs:
         # No-ops cleanly if SLACK_SECURITY_WEBHOOK is unset (early exit, not
         # a failure) so an org without the secret provisioned doesn't get a
         # red daily workflow.
-        if: steps.sweep.outputs.rc == '1'
+        if: always() && steps.sweep.outputs.rc == '1'
         shell: bash
         env:
           SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
@@ -239,7 +239,7 @@ jobs:
                           text: ("```\n" + ($summary | .[0:2800]) + "\n```") } }
               ]
             }')"
-          http_code="$(curl -sS -X POST -H 'Content-Type: application/json' \
+          http_code="$(curl -sS --connect-timeout 5 --max-time 15 -X POST -H 'Content-Type: application/json' \
             --data "$payload" \
             -o /tmp/slack.out \
             -w '%{http_code}' \
