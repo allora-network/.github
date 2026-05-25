@@ -81,6 +81,16 @@ jobs:
         # fail this step.
         run: |
           set -uo pipefail
+          # Integrity gate: the script is vendored verbatim from upstream
+          # (allora-network/skills). Verify the committed SHA-256 sidecar
+          # matches the on-disk file before invoking it — any PR that
+          # modifies the script body without refreshing the sidecar fails
+          # this step loudly instead of executing a tampered detector.
+          # Refresh: `shasum -a 256 scripts/shai-hulud-ioc-sweep.sh > scripts/shai-hulud-ioc-sweep.sh.sha256`
+          if ! sha256sum --check --status scripts/shai-hulud-ioc-sweep.sh.sha256; then
+            echo "::error::Integrity check failed for scripts/shai-hulud-ioc-sweep.sh — committed SHA-256 sidecar does not match the file on disk. Refusing to execute."
+            exit 1
+          fi
           chmod +x scripts/shai-hulud-ioc-sweep.sh
           # Pin OUTPUT_DIR so subsequent steps can find findings.json and
           # summary.md by a known path. Default of $(date) would change
@@ -116,16 +126,26 @@ jobs:
             *)     exit "$rc" ;;
           esac
 
-      - name: Upload sweep artifacts (findings + forensic evidence)
+      - name: Upload sweep artifacts (findings only)
         if: always() && steps.sweep.outputs.output_dir != ''
-        # SHA pin: actions/upload-artifact v4.4.3 (Oct 2024). Preserves the
-        # forensic evidence directory (clones of any repo that produced an
-        # IOC-grade finding) for 30 days so humans can inspect the matched
-        # file without re-cloning (point-in-time evidence may have moved).
+        # SHA pin: actions/upload-artifact v4.4.3 (Oct 2024).
+        #
+        # Artifact scope is intentionally narrow: only the structured
+        # findings + summary + repo list. Anyone with `actions: read` on
+        # this repo can download workflow artifacts, but the org includes
+        # private repositories, and uploading raw clones (`clones/`) or
+        # preserved evidence trees (`evidence/`) would expose private-repo
+        # source code to anyone who can read this workflow's runs.
+        # Privileged incident responders can re-clone any flagged repo on
+        # demand from the findings — the runner just needs to surface
+        # which repos matched, not their full contents.
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
         with:
           name: shai-hulud-sweep-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.sweep.outputs.output_dir }}
+          path: |
+            ${{ steps.sweep.outputs.output_dir }}/findings.json
+            ${{ steps.sweep.outputs.output_dir }}/summary.md
+            ${{ steps.sweep.outputs.output_dir }}/repos.txt
           if-no-files-found: warn
           retention-days: 30
 
@@ -146,8 +166,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -s "$SUMMARY_PATH" ]; then
-            echo "::warning::sweep summary missing or empty at $SUMMARY_PATH; skipping issue update."
-            exit 0
+            # Script's precondition gates (missing IOC seed files, missing
+            # required tooling, pre-aggregation crash) can exit non-zero
+            # before summary.md is written. The workflow's documented
+            # contract is "rc != 0 → rolling-issue update"; silently
+            # exiting here would break that contract and let an operational
+            # failure go un-triaged. Substitute a minimal placeholder so
+            # the issue gets the rc and run-URL even when there's no
+            # script-generated summary to attach.
+            echo "::warning::sweep summary missing or empty at $SUMMARY_PATH; emitting precondition-failed placeholder for rolling-issue update."
+            SUMMARY_PATH=/tmp/sweep-summary-placeholder.md
+            printf 'precondition failed: sweep script exited %s before producing summary.md. See workflow logs for the underlying error (missing IOC seed files, missing dependency, or pre-aggregation crash).\n' "$SWEEP_RC" \
+              > "$SUMMARY_PATH"
           fi
 
           ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -165,15 +195,26 @@ jobs:
             echo "- **Run:** $run_url"
             echo "- **Trigger:** \`${GITHUB_EVENT_NAME}\`"
             echo
-            cat "$SUMMARY_PATH"
+            # Summary content may contain attacker-controllable strings via
+            # IOC `detail` fields (e.g., lockfile lines, commit messages from
+            # scanned repos). Wrap in a fenced code block and strip characters
+            # that could escape the fence or inject markdown/HTML in the
+            # rendered issue body. findings.json (preserved in the uploaded
+            # artifact) is the canonical un-sanitized source for forensic
+            # review.
+            echo '```'
+            tr -d '`<>|*_' < "$SUMMARY_PATH"
+            echo '```'
           } > /tmp/sweep-comment.md
 
           # Find an existing open rolling issue with our label, oldest first
           # (so a long-running incident issue stays the canonical thread even
-          # if someone files a duplicate later).
+          # if someone files a duplicate later). `gh issue list` defaults to
+          # newest-first; use `--search` with `sort:created-asc` to invert that
+          # — `gh issue list` does not expose a `--sort` flag, so the search
+          # query is the supported lever.
           existing="$(gh issue list \
-            --label "$ROLLING_LABEL" \
-            --state open \
+            --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
             --limit 1 \
             --json number \
             --jq '.[0].number // empty')"
@@ -220,6 +261,12 @@ jobs:
           # Cap summary at ~2.8 KB so the Slack block stays inside the 3000-char
           # per-block limit even after JSON escaping headroom.
           summary="$(head -c 6000 "$SUMMARY_PATH" 2>/dev/null || echo 'summary unavailable')"
+          # Strip characters that could escape the Slack code fence or inject
+          # block-kit mrkdwn. IOC `detail` strings can quote lockfile or
+          # commit content from scanned repos and are therefore attacker-
+          # controllable. findings.json (preserved in the uploaded artifact)
+          # is the canonical un-sanitized source for forensic review.
+          summary="$(printf '%s' "$summary" | tr -d '`<>|*_')"
           # jq builds the payload so embedded quotes/newlines/unicode in the
           # summary can't break the JSON or inject Slack block-kit markup.
           payload="$(jq -nc \
@@ -239,16 +286,51 @@ jobs:
                           text: ("```\n" + ($summary | .[0:2800]) + "\n```") } }
               ]
             }')"
-          http_code="$(curl -sS --connect-timeout 5 --max-time 15 -X POST -H 'Content-Type: application/json' \
-            --data "$payload" \
-            -o /tmp/slack.out \
-            -w '%{http_code}' \
-            "$SLACK_SECURITY_WEBHOOK" || echo 000)"
+          # Retry on transient HTTP failures with exponential backoff (5s,
+          # 15s, 45s). Implemented in shell (not `curl --retry`) so we can
+          # honor Slack's Retry-After header on HTTP 429.
+          # Success: HTTP 200. Retry: 408/429/5xx + curl connect failures.
+          # Terminal: any other 4xx (configuration bug, bad webhook, etc.).
+          http_code=000
+          attempt=0
+          max_attempts=3
+          delays=(5 15 45)
+          while [ "$attempt" -lt "$max_attempts" ]; do
+            attempt=$((attempt + 1))
+            http_code="$(curl -sS --connect-timeout 5 --max-time 15 \
+              -X POST -H 'Content-Type: application/json' \
+              --data "$payload" \
+              -D /tmp/slack.headers \
+              -o /tmp/slack.out \
+              -w '%{http_code}' \
+              "$SLACK_SECURITY_WEBHOOK" || echo 000)"
+            if [ "$http_code" = "200" ]; then
+              break
+            fi
+            # Decide whether to retry. 408/429/5xx and curl-level failures
+            # (http_code=000) are transient; other 4xx are terminal.
+            case "$http_code" in
+              000|408|429|5*) transient=1 ;;
+              *)              transient=0 ;;
+            esac
+            if [ "$transient" -ne 1 ] || [ "$attempt" -ge "$max_attempts" ]; then
+              break
+            fi
+            sleep_for="${delays[$((attempt - 1))]}"
+            # If Slack sent Retry-After (429), prefer it when larger than our
+            # default backoff — being polite is cheap.
+            retry_after="$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/ {gsub(/[\r\n]/,"",$2); print $2; exit}' /tmp/slack.headers 2>/dev/null || true)"
+            if [ "$http_code" = "429" ] && [ -n "$retry_after" ] && [ "$retry_after" -gt "$sleep_for" ] 2>/dev/null; then
+              sleep_for="$retry_after"
+            fi
+            echo "::warning::Slack webhook attempt $attempt/$max_attempts returned HTTP $http_code; retrying in ${sleep_for}s."
+            sleep "$sleep_for"
+          done
           if [ "$http_code" != "200" ]; then
-            echo "::error::Slack webhook returned HTTP $http_code: $(head -c 500 /tmp/slack.out 2>/dev/null || true)"
+            echo "::error::Slack webhook returned HTTP $http_code after $attempt attempt(s): $(head -c 500 /tmp/slack.out 2>/dev/null || true)"
             exit 1
           fi
-          echo "Slack page delivered (HTTP $http_code)."
+          echo "Slack page delivered (HTTP $http_code, attempts=$attempt)."
 
       - name: Final run summary
         if: always()
