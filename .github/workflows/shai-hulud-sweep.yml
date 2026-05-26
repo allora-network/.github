@@ -168,6 +168,48 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Find rolling issue
+        # Resolve the rolling-issue number ONCE per run and reuse it across
+        # the ioc-dedup, rolling-issue-update, and Slack-paged-marker steps.
+        # Removes the duplicated `gh issue list` query that previously lived
+        # in both ioc-dedup and the update step (drift hazard: a future
+        # tweak to one query without the other would mis-locate the rolling
+        # issue on one surface) and closes a TOCTOU window where a human
+        # could close the rolling issue between the two queries, sending
+        # the second consumer to a stale/empty issue_num.
+        #
+        # Gated on `rc == '1' || rc == '2'` so this step matches the union
+        # of consumers below: ioc-dedup (rc=1), the update step (rc=1|2),
+        # and the new paged-at marker step (rc=1 + Slack-paged). Clean
+        # runs (rc=0) skip — there's nothing to attach.
+        #
+        # Empty `issue_num` is a valid state (first ever non-clean run,
+        # rolling issue not yet created); the update step's gh-issue-create
+        # path below handles that case.
+        if: always() && (steps.sweep.outputs.rc == '1' || steps.sweep.outputs.rc == '2')
+        id: find-rolling-issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `gh issue list --search "... sort:created-asc"` mirrors the
+          # update step's lookup (oldest open issue with the rolling label
+          # wins, so a long-running incident issue stays canonical even if
+          # someone files a duplicate). `--limit 1` + `.[0].number // empty`
+          # gives an empty string when no rolling issue exists yet.
+          issue_num="$(gh issue list \
+            --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty' 2>/dev/null || true)"
+          echo "issue_num=${issue_num}" >> "$GITHUB_OUTPUT"
+          if [ -n "$issue_num" ]; then
+            echo "::notice::Resolved rolling issue #${issue_num} for label=${ROLLING_LABEL}."
+          else
+            echo "::notice::No open rolling issue found for label=${ROLLING_LABEL}; update step will create one."
+          fi
+
       - name: Compute IOC stamp and Slack dedup decision
         # Decide whether the IOC-grade Slack page fires for this run. Without
         # this gate the bare `rc == '1'` Slack step pages on EVERY IOC-grade
@@ -204,6 +246,7 @@ jobs:
         shell: bash
         env:
           FINDINGS_PATH: ${{ steps.sweep.outputs.findings_path }}
+          FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
           # `issues:read` only — the same scope used by the rolling-issue
           # update step below. Keep narrow.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -250,27 +293,36 @@ jobs:
             exit 0
           fi
 
-          # Locate the rolling issue (same query as the update step below
-          # — keep in sync). Empty when no rolling issue exists yet (first
-          # ever IOC run); prev_* stay empty and we page.
-          issue_num="$(gh issue list \
-            --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
-            --limit 1 \
-            --json number \
-            --jq '.[0].number // empty' 2>/dev/null || true)"
+          # Rolling issue number resolved by the upstream find-rolling-issue
+          # step (single canonical lookup; eliminates the prior drift hazard
+          # of two independent `gh issue list` queries). Empty when no
+          # rolling issue exists yet (first ever IOC run); prev_* stay empty
+          # and we page.
+          issue_num="${FIND_ROLLING_ISSUE_NUM:-}"
 
           prev_stamp=""
           prev_paged_at=""
           if [ -n "$issue_num" ]; then
-            # Dump all comments as NDJSON across all pages, then sort
-            # cross-page by created_at desc and pick the most recent
-            # marker occurrence. `gh api --paginate --jq '.[]'` emits one
-            # JSON object per comment per page; jq -s re-slurps them so
-            # sort_by spans the whole history (per-page sorts would miss
-            # the global most-recent on multi-page rolling issues).
+            # Dump comments authored by `github-actions[bot]` ONLY across
+            # all pages, then sort cross-page by created_at desc and pick
+            # the most recent marker occurrence. Filtering by author closes
+            # the marker-spoofing channel: without it, anyone with `issues:
+            # write` (or anyone able to social-engineer a maintainer into
+            # pasting attacker-supplied marker text) could inject
+            # `<!-- shai-hulud-ioc-stamp: <forged-sha256> -->` or
+            # `<!-- shai-hulud-paged-at: <future-iso8601> -->` into the
+            # rolling issue and silently suppress real Slack pages by
+            # poisoning the dedup chain. Only this workflow (running as
+            # GITHUB_TOKEN) emits the canonical markers, and its comments
+            # are authored by `github-actions[bot]` — restrict the source
+            # set accordingly.
+            # `gh api --paginate --jq '.[] | ...'` emits one JSON object
+            # per comment per page; jq -s re-slurps them so sort_by spans
+            # the whole history (per-page sorts would miss the global
+            # most-recent on multi-page rolling issues).
             comments_nd="$(gh api --paginate \
               "repos/${GITHUB_REPOSITORY}/issues/${issue_num}/comments" \
-              --jq '.[] | {body: .body, created_at: .created_at}' \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | {body: .body, created_at: .created_at}' \
               2>/dev/null || true)"
             if [ -n "$comments_nd" ]; then
               prev_stamp="$(printf '%s\n' "$comments_nd" \
@@ -349,6 +401,7 @@ jobs:
           SHOULD_PAGE: ${{ steps.ioc-dedup.outputs.should_page }}
           DECISION_REASON: ${{ steps.ioc-dedup.outputs.decision_reason }}
           PREV_PAGED_AT: ${{ steps.ioc-dedup.outputs.prev_paged_at }}
+          FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
           # Issue ops are scoped to THIS repo (allora-network/.github) and
           # only need the workflow's own GITHUB_TOKEN with `issues: write`.
           # A wider GH_ORG_READ_TOKEN (used above for org enumeration) may
@@ -423,37 +476,43 @@ jobs:
             echo '```'
             tr -d '`<>|*_[]()' < "$SUMMARY_PATH"
             echo '```'
-            # Persist the Slack dedup state via hidden HTML markers so the
-            # next IOC-grade run can compare against it. Emitted ONLY for
-            # rc=1 with a real stamp — operational-only runs (rc=2) MUST
-            # NOT emit stamps (they'd corrupt the IOC dedup chain). The
-            # paged-at marker is emitted ONLY when this run actually paged
-            # Slack, so a deduped run preserves the older real paged-at
-            # timestamp via the upstream comment, keeping the >=7d weekly
-            # re-page window honest. Stamp/paged-at values are workflow-
-            # generated (sha256 hex / ISO8601 UTC) — no attacker input —
-            # so they bypass the summary sanitizer safely.
+            # Persist the IOC stamp marker so the next IOC-grade run can
+            # compare against it. Emitted ONLY for rc=1 with a real stamp
+            # — operational-only runs (rc=2) MUST NOT emit stamps (they'd
+            # corrupt the IOC dedup chain). The stamp represents the
+            # dedup-decision input (the IOC set we observed this run), not
+            # the Slack-delivery outcome — emitting it here regardless of
+            # Slack's eventual success is correct: the next run's dedup
+            # gate needs to know what IOC set this run observed.
+            #
+            # The paged-at marker is intentionally NOT emitted here. A
+            # downstream "Persist Slack-paged marker" step (gated on
+            # `success() && rc==1 && should_page==true`) appends a separate
+            # comment containing only `<!-- shai-hulud-paged-at: ... -->`
+            # AFTER the Slack page step actually succeeds, so a failed
+            # Slack delivery doesn't poison the dedup chain by recording a
+            # paged-at timestamp for a page that never landed. The dedup
+            # reader (ioc-dedup step) scans the most-recent paged-at marker
+            # across ALL bot-authored comments, so splitting the markers
+            # across two comments composes correctly with no parser change.
+            # Stamp/dedup-reason values are workflow-generated (sha256 hex
+            # / decision tokens) — no attacker input — so they bypass the
+            # summary sanitizer safely.
             if [ "$SWEEP_RC" = "1" ] && [ -n "${IOC_STAMP:-}" ]; then
               echo
               echo "<!-- shai-hulud-ioc-stamp: ${IOC_STAMP} -->"
-              if [ "${SHOULD_PAGE:-}" = "true" ]; then
-                echo "<!-- shai-hulud-paged-at: $(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
-              fi
               echo "<!-- shai-hulud-dedup-reason: ${DECISION_REASON:-unknown} -->"
             fi
           } > /tmp/sweep-comment.md
 
-          # Find an existing open rolling issue with our label, oldest first
-          # (so a long-running incident issue stays the canonical thread even
-          # if someone files a duplicate later). `gh issue list` defaults to
-          # newest-first; use `--search` with `sort:created-asc` to invert that
-          # — `gh issue list` does not expose a `--sort` flag, so the search
-          # query is the supported lever.
-          existing="$(gh issue list \
-            --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
-            --limit 1 \
-            --json number \
-            --jq '.[0].number // empty')"
+          # Rolling-issue number resolved by the upstream find-rolling-issue
+          # step (oldest open issue with the rolling label wins, so a
+          # long-running incident issue stays the canonical thread even if
+          # someone files a duplicate later). A single canonical lookup
+          # eliminates the prior drift hazard between two independent
+          # `gh issue list` queries and closes a TOCTOU window where a
+          # human could close the rolling issue between the two queries.
+          existing="${FIND_ROLLING_ISSUE_NUM:-}"
 
           if [ -n "$existing" ]; then
             echo "Appending to existing rolling issue #$existing"
@@ -620,6 +679,72 @@ jobs:
             exit 1
           fi
           echo "Slack page delivered (HTTP $http_code, attempts=$attempt)."
+
+      - name: Persist Slack-paged marker
+        # Append a one-line bot comment recording the moment Slack
+        # actually delivered the IOC page. Gated on `success()` of the
+        # upstream `Page Slack on IOC findings` step (and `rc==1 +
+        # should_page=='true'` for defense-in-depth), so a failed Slack
+        # delivery never writes a paged-at marker. Previously this marker
+        # was emitted inside the rolling-issue update step (before Slack
+        # ran), meaning a failed Slack send would still record a paged-at
+        # timestamp and silently corrupt the dedup chain for up to 7 days
+        # — the dedup gate would believe Slack had paged, suppress the
+        # next IOC-grade run's page, and the standing IOC would silently
+        # stop alerting until the weekly re-page window expired.
+        #
+        # The marker is in a SEPARATE comment from the IOC-stamp comment
+        # written by the update step above. The ioc-dedup reader scans
+        # the most-recent `<!-- shai-hulud-paged-at: ... -->` across ALL
+        # bot-authored comments on the rolling issue (sorted by
+        # created_at desc), so splitting the markers across two comments
+        # composes correctly with no parser change.
+        #
+        # `success() && ...` — `success()` is critical here: a default
+        # `if: always() && ...` would fire even when the Slack page step
+        # FAILED, reintroducing the very bug this gate exists to prevent.
+        if: success() && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
+        shell: bash
+        env:
+          FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
+          # `issues:write` only — same scope as the rolling-issue update
+          # step. The marker comment is workflow-generated content (a
+          # single hidden HTML marker with a workflow-supplied ISO8601
+          # timestamp), no attacker input.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          issue_num="${FIND_ROLLING_ISSUE_NUM:-}"
+          if [ -z "$issue_num" ]; then
+            # The update step above either appended to an existing issue
+            # or created a new one. If find-rolling-issue saw nothing AND
+            # the update step created a fresh issue (because $existing was
+            # empty), we need to look the new issue up here. Otherwise
+            # the paged-at marker would silently land nowhere and the
+            # dedup chain would believe Slack never paged.
+            issue_num="$(gh issue list \
+              --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
+              --limit 1 \
+              --json number \
+              --jq '.[0].number // empty' 2>/dev/null || true)"
+          fi
+          if [ -z "$issue_num" ]; then
+            echo "::warning::No rolling issue resolvable for paged-at marker; the next IOC-grade run will treat this as 'paged-at-missing' and conservatively page (fail-OPEN). Investigate why the update step neither found nor created a rolling issue."
+            exit 0
+          fi
+          paged_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # The marker MUST be the only meaningful content of the comment
+          # — the dedup scanner regex-greps for the marker in comment
+          # bodies, so additional surrounding text is fine but kept
+          # minimal here so human readers can see at a glance what the
+          # comment records.
+          {
+            echo "Slack page delivered at \`${paged_at}\`."
+            echo
+            echo "<!-- shai-hulud-paged-at: ${paged_at} -->"
+          } > /tmp/sweep-paged-at-comment.md
+          gh issue comment "$issue_num" --body-file /tmp/sweep-paged-at-comment.md
+          echo "::notice::Recorded paged-at=${paged_at} on rolling issue #${issue_num}."
 
       - name: Slack page suppressed by IOC dedup
         # IOC-grade run that matched the previous run's stamp and hasn't
