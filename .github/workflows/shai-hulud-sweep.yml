@@ -87,6 +87,25 @@ jobs:
           # modifies the script body without refreshing the sidecar fails
           # this step loudly instead of executing a tampered detector.
           # Refresh: `shasum -a 256 scripts/shai-hulud-ioc-sweep.sh > scripts/shai-hulud-ioc-sweep.sh.sha256`
+          #
+          # Pin the sidecar's path field before invoking `sha256sum --check`.
+          # `sha256sum --check` parses each manifest line as `<hash>  <path>`
+          # and resolves <path> relative to cwd — it does NOT enforce that
+          # <path> equals scripts/shai-hulud-ioc-sweep.sh. Without this
+          # guard, an attacker who can mutate the sidecar (CODEOWNERS gate
+          # requires security review, but defense-in-depth) could repoint
+          # the sidecar at any other in-tree file whose hash they control
+          # (e.g. LICENSE, or the sidecar itself) and pass the gate while
+          # the actual detector script is silently swapped to a no-op.
+          # Lock the gate to the single expected `<sha>  <path>` line.
+          if ! grep -qE '^[0-9a-f]{64}  scripts/shai-hulud-ioc-sweep\.sh$' scripts/shai-hulud-ioc-sweep.sh.sha256; then
+            echo "::error::Sidecar path validation failed for scripts/shai-hulud-ioc-sweep.sh.sha256 — expected exactly one line of the form '<sha256>  scripts/shai-hulud-ioc-sweep.sh'. Refusing to execute (sidecar may have been retargeted at a different file)."
+            exit 1
+          fi
+          if [ "$(wc -l < scripts/shai-hulud-ioc-sweep.sh.sha256 | tr -d ' ')" != "1" ]; then
+            echo "::error::Sidecar scripts/shai-hulud-ioc-sweep.sh.sha256 must contain exactly one manifest line. Refusing to execute."
+            exit 1
+          fi
           if ! sha256sum --check --status scripts/shai-hulud-ioc-sweep.sh.sha256; then
             echo "::error::Integrity check failed for scripts/shai-hulud-ioc-sweep.sh — committed SHA-256 sidecar does not match the file on disk. Refusing to execute."
             exit 1
@@ -153,7 +172,15 @@ jobs:
         # Update the rolling issue on any non-clean run (operational OR IOC).
         # Clean runs (exit 0) leave the issue alone — humans drive close /
         # reopen so triage state survives across daily runs.
-        if: steps.sweep.outputs.rc == '1' || steps.sweep.outputs.rc == '2'
+        #
+        # `always()` keeps the rolling-issue update coupled to the sweep
+        # script's exit code only — decoupled from upstream step success.
+        # Without it, a flaky `Upload sweep artifacts` step (or any other
+        # earlier non-`always()` step that ends up failing) silently
+        # suppresses the operational-finding signal, leaving an exit-2 run
+        # invisible everywhere except the workflow run list. Mirrors the
+        # Slack page step's `always()` gating below.
+        if: always() && (steps.sweep.outputs.rc == '1' || steps.sweep.outputs.rc == '2')
         shell: bash
         env:
           SWEEP_RC: ${{ steps.sweep.outputs.rc }}
@@ -202,8 +229,15 @@ jobs:
             # rendered issue body. findings.json (preserved in the uploaded
             # artifact) is the canonical un-sanitized source for forensic
             # review.
+            #
+            # Sanitization set MUST stay in sync with the Slack step below
+            # (search for the identical `tr -d` invocation). Both surfaces
+            # render attacker-influenced strings; asymmetric drift would
+            # leave one channel exploitable. Stripping `[]()` neutralizes
+            # GitHub-Flavored-Markdown link syntax (`[click](https://evil)`)
+            # which survives the `<>|*_`` strip alone.
             echo '```'
-            tr -d '`<>|*_' < "$SUMMARY_PATH"
+            tr -d '`<>|*_[]()' < "$SUMMARY_PATH"
             echo '```'
           } > /tmp/sweep-comment.md
 
@@ -258,15 +292,30 @@ jobs:
             exit 0
           fi
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          # Cap summary at ~2.8 KB so the Slack block stays inside the 3000-char
-          # per-block limit even after JSON escaping headroom.
-          summary="$(head -c 6000 "$SUMMARY_PATH" 2>/dev/null || echo 'summary unavailable')"
-          # Strip characters that could escape the Slack code fence or inject
-          # block-kit mrkdwn. IOC `detail` strings can quote lockfile or
-          # commit content from scanned repos and are therefore attacker-
-          # controllable. findings.json (preserved in the uploaded artifact)
-          # is the canonical un-sanitized source for forensic review.
-          summary="$(printf '%s' "$summary" | tr -d '`<>|*_')"
+          # Read+sanitize the full summary, then let jq codepoint-slice to
+          # the Slack 3000-char-per-block limit below. An earlier version
+          # used `head -c 6000` to cap pre-sanitization, but byte-boundary
+          # truncation can split a multi-byte UTF-8 sequence (non-ASCII
+          # content can appear in IOC `detail` fields quoted from scanned
+          # repos). Under `set -euo pipefail`, a malformed UTF-8 byte
+          # passed via `jq --arg` aborts the step, silently dropping the
+          # IOC-grade Slack page on an unlucky boundary. summary.md is
+          # bounded by IOC count (one line per finding) so reading the
+          # whole file is safe in practice.
+          #
+          # Strip characters that could escape the Slack code fence or
+          # inject block-kit mrkdwn. IOC `detail` strings are attacker-
+          # influenceable; findings.json (preserved in the uploaded
+          # artifact) is the canonical un-sanitized source for forensic
+          # review.
+          #
+          # Sanitization set MUST stay in sync with the rolling-issue step
+          # above (search for the identical `tr -d` invocation). Both
+          # surfaces render attacker-influenced strings; asymmetric drift
+          # would leave one channel exploitable. Stripping `[]()`
+          # neutralizes Slack-mrkdwn / link-style sequences that survive
+          # the `<>|*_`` strip alone.
+          summary="$(tr -d '`<>|*_[]()' < "$SUMMARY_PATH" 2>/dev/null || echo 'summary unavailable')"
           # jq builds the payload so embedded quotes/newlines/unicode in the
           # summary can't break the JSON or inject Slack block-kit markup.
           payload="$(jq -nc \
@@ -291,10 +340,24 @@ jobs:
           # honor Slack's Retry-After header on HTTP 429.
           # Success: HTTP 200. Retry: 408/429/5xx + curl connect failures.
           # Terminal: any other 4xx (configuration bug, bad webhook, etc.).
+          #
+          # `RETRY_AFTER_MAX_S` caps the server-supplied Retry-After value
+          # so a misbehaving proxy (or a compromised webhook URL returning
+          # `Retry-After: 86400`) cannot consume the job's 60-minute budget
+          # in a single sleep and silently drop the IOC-grade Slack page.
+          # 120s comfortably exceeds Slack's documented Retry-After values
+          # while staying well inside the job timeout headroom.
           http_code=000
           attempt=0
-          max_attempts=3
           delays=(5 15 45)
+          # Derive max_attempts from the delays array so the two cannot
+          # drift — bumping retries by adding a delay value is enough.
+          # Previously, a maintainer tuning `max_attempts=4` without
+          # adding a fourth element to `delays` would index past the
+          # array and `sleep ""` (which errors under `set -euo pipefail`
+          # and drops the Slack page).
+          max_attempts=${#delays[@]}
+          RETRY_AFTER_MAX_S=120
           while [ "$attempt" -lt "$max_attempts" ]; do
             attempt=$((attempt + 1))
             http_code="$(curl -sS --connect-timeout 5 --max-time 15 \
@@ -318,9 +381,15 @@ jobs:
             fi
             sleep_for="${delays[$((attempt - 1))]}"
             # If Slack sent Retry-After (429), prefer it when larger than our
-            # default backoff — being polite is cheap.
+            # default backoff — being polite is cheap. Cap at
+            # RETRY_AFTER_MAX_S so a hostile/misconfigured upstream can't
+            # blow past the job timeout in a single sleep.
             retry_after="$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/ {gsub(/[\r\n]/,"",$2); print $2; exit}' /tmp/slack.headers 2>/dev/null || true)"
             if [ "$http_code" = "429" ] && [ -n "$retry_after" ] && [ "$retry_after" -gt "$sleep_for" ] 2>/dev/null; then
+              if [ "$retry_after" -gt "$RETRY_AFTER_MAX_S" ] 2>/dev/null; then
+                echo "::warning::Slack Retry-After=${retry_after}s exceeds cap ${RETRY_AFTER_MAX_S}s; clamping."
+                retry_after="$RETRY_AFTER_MAX_S"
+              fi
               sleep_for="$retry_after"
             fi
             echo "::warning::Slack webhook attempt $attempt/$max_attempts returned HTTP $http_code; retrying in ${sleep_for}s."
