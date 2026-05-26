@@ -53,11 +53,20 @@ jobs:
       GO_TRUSTED_HOSTS_RE: 'github\.com/(allora-network|cosmos|ethereum|fluxcd)|gopkg\.in|google\.golang\.org|go\.uber\.org|go\.opentelemetry\.io|k8s\.io|sigs\.k8s\.io'
       # Prefer a dedicated org-read PAT/App token when provisioned —
       # required to enumerate private repos. Falls back to the workflow's
-      # default GITHUB_TOKEN, which can only see public org repos;
-      # `gh search code` will simply omit private hits in that mode, so
-      # the partial-coverage state is visible in the audit log (no
-      # silent false-clean). Aligned with DEVOP-560's pattern.
+      # default GITHUB_TOKEN; `gh search code` can only see public hits
+      # in that mode. We do NOT silently accept partial coverage — the
+      # "Probe token scope" step below detects when only public scope is
+      # available and fails the audit loudly so an operator must either
+      # provision GH_ORG_READ_TOKEN or accept (and ack via env) the
+      # public-only audit posture. Per PR #9 review (cubic-dev-ai P1).
       GH_TOKEN: ${{ secrets.GH_ORG_READ_TOKEN || secrets.GITHUB_TOKEN }}
+      # Set `ACCEPT_PUBLIC_ONLY_AUDIT` as an org-level env override (e.g.
+      # via `gh variable set ACCEPT_PUBLIC_ONLY_AUDIT --value true`) when
+      # an org consciously accepts a public-only audit because it has no
+      # private Go modules — that converts the scope-probe failure into a
+      # documented warning. Without this override, missing org scope
+      # fails the workflow.
+      ACCEPT_PUBLIC_ONLY_AUDIT: ${{ vars.ACCEPT_PUBLIC_ONLY_AUDIT || 'false' }}
 
     steps:
       - name: Checkout .github repo (allowlist is sourced from env above)
@@ -76,6 +85,68 @@ jobs:
           jq --version
           awk --version | head -1 || true
           base64 --version | head -1 || true
+
+      - name: Probe token scope (fail loudly on partial coverage)
+        # Detects silent false-clean: when only `GITHUB_TOKEN` is
+        # available (no `GH_ORG_READ_TOKEN` secret provisioned),
+        # `gh search code` and `gh api orgs/$ORG/repos?type=private`
+        # both omit private repos — the audit would then run against a
+        # truncated set and report "clean" while every private Go module
+        # in the org went unaudited.
+        #
+        # This step probes for private-scope visibility by listing the
+        # org's private repos via the org repos endpoint with
+        # `type=private`. If the endpoint returns zero results AND the
+        # org actually has private repos (per `gh api orgs/$ORG` -
+        # `total_private_repos`), the token clearly lacks the required
+        # scope; fail with an actionable error unless the operator has
+        # explicitly opted in to a public-only audit via the
+        # ACCEPT_PUBLIC_ONLY_AUDIT env override.
+        #
+        # An org with `total_private_repos == 0` is a clean public-only
+        # scope by definition — no failure.
+        shell: bash
+        run: |
+          set -uo pipefail
+          # `total_private_repos` requires read on the org object itself;
+          # a token with NO org access at all will hit a 404 here. Treat
+          # that as "private count unknown" (probe defers to the explicit
+          # listing below) rather than failing the audit outright on a
+          # public org with a misconfigured token.
+          total_private=$(gh api "orgs/$ORG" --jq '.total_private_repos // empty' 2>/dev/null || true)
+          if [ -z "$total_private" ]; then
+            total_private="unknown"
+          fi
+          # Listing returns the COUNT of private repos visible to the
+          # token. Compare against `total_private_repos` to detect a
+          # token scope gap.
+          visible_private=$(gh api "orgs/$ORG/repos?type=private&per_page=1" \
+            --jq 'length' 2>/dev/null || echo 0)
+          echo "Org private-repo count: $total_private"
+          echo "Private repos visible to token: $visible_private"
+
+          # Three cases:
+          #   1. total_private == 0           -> public-only org, clean audit
+          #   2. visible_private > 0          -> token has org scope, full audit
+          #   3. total_private > 0 AND        -> SCOPE GAP, fail unless ack'd
+          #      visible_private == 0
+          if [ "$total_private" = "0" ]; then
+            echo "::notice::Org has no private repos; public-only audit covers full scope."
+            exit 0
+          fi
+          if [ "$visible_private" -gt 0 ] 2>/dev/null; then
+            echo "::notice::Token has org-read scope; audit will cover both public and private Go modules."
+            exit 0
+          fi
+          # Scope gap. Honor the operator-ack'd public-only mode if set.
+          if [ "${ACCEPT_PUBLIC_ONLY_AUDIT:-false}" = "true" ]; then
+            echo "::warning::Token lacks private-repo visibility (ACCEPT_PUBLIC_ONLY_AUDIT=true). Auditing PUBLIC repos only — private Go modules will not be scanned."
+            exit 0
+          fi
+          # Failure path: emit an actionable error and abort.
+          echo "::error::Token cannot see private repos in $ORG (total_private_repos=$total_private, visible=$visible_private). This audit would silently false-clean every private Go module."
+          echo "::error::Fix one of: (a) provision GH_ORG_READ_TOKEN secret with read:org + repo:read; or (b) set ACCEPT_PUBLIC_ONLY_AUDIT=true at org-vars level to consciously accept a public-only audit."
+          exit 1
 
       - name: Enumerate org Go modules
         id: enumerate

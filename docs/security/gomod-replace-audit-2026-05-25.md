@@ -27,7 +27,8 @@ Linear: [DEVOP-617](https://linear.app/alloralabs/issue/DEVOP-617)
 | Metric | Count |
 |---|---|
 | Go modules scanned | **12** (across 11 repos) |
-| Modules with **zero** replace directives | **8** |
+| Modules with **zero** replace directives | **9** (12 scanned − 3 with replaces = 9) |
+| Modules with at least one replace directive | **3** (`allora-chain/go.mod`, `allora-sdk-go/go.mod`, `forge-v2/backend/go.mod`) |
 | Total `replace` directives found | **6** |
 | Allowlisted-host RHS | 2 |
 | Non-allowlisted-host RHS (all version-pin pattern) | 4 |
@@ -44,7 +45,7 @@ Linear: [DEVOP-617](https://linear.app/alloralabs/issue/DEVOP-617)
 
 ## Repos with zero replace directives
 
-These eight modules carry no `replace` directives at all (clean):
+These nine modules carry no `replace` directives at all (clean):
 
 - `allora-network/allora-chain` — `linter/maprange/go.mod`
 - `allora-network/allora-forge-platform` — `apps/backend/go.mod`
