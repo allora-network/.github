@@ -214,6 +214,15 @@ jobs:
 
           current_stamp=""
           if [ -s "$FINDINGS_PATH" ]; then
+            # `|| true` keeps `set -euo pipefail` from aborting the step when
+            # the jq pipeline fails (malformed findings.json, mid-run file
+            # mutation, jq filter error). The empty/garbage `current_stamp`
+            # then routes through the documented fail-open guard below
+            # (`if [ -z "$current_stamp" ] || ! grep -qE '^[0-9a-f]{64}$'`)
+            # which warns and pages Slack instead of silently fail-CLOSED.
+            # Mirrors the `|| true` already present on the four sibling
+            # pipelines in this same step (gh issue list, gh api comments
+            # fetch, prev_stamp scan, prev_paged_at scan).
             current_stamp="$(jq -r --arg re "$IOC_RULES_RE" '
                 [.[]
                   | select(.rule | test($re))
@@ -221,7 +230,7 @@ jobs:
                 | sort
                 | .[]
               ' "$FINDINGS_PATH" 2>/dev/null \
-              | sha256sum | awk '{print $1}')"
+              | sha256sum | awk '{print $1}' || true)"
           fi
           if [ -z "$current_stamp" ] \
              || ! printf '%s' "$current_stamp" | grep -qE '^[0-9a-f]{64}$'; then
@@ -559,13 +568,25 @@ jobs:
           RETRY_AFTER_MAX_S=120
           while [ "$attempt" -lt "$max_attempts" ]; do
             attempt=$((attempt + 1))
+            # `curl -w '%{http_code}'` writes the HTTP code (or `000` on
+            # transport failure: connect refused, DNS fail, TLS error,
+            # connect-timeout) to stdout AND exits non-zero on transport
+            # failure. The previous `|| echo 000` form appended an extra
+            # `000` to that stdout, producing the literal string `000000`,
+            # which falls through the `000|408|429|5*` case to terminal=0
+            # and silently disables the curl-level retry path the loop
+            # exists for. `|| true` here keeps `set -euo pipefail` happy
+            # without corrupting the captured value; the `:= 000` default
+            # below pins the rare empty-output case to the documented
+            # transient-classification token.
             http_code="$(curl -sS --connect-timeout 5 --max-time 15 \
               -X POST -H 'Content-Type: application/json' \
               --data "$payload" \
               -D /tmp/slack.headers \
               -o /tmp/slack.out \
               -w '%{http_code}' \
-              "$SLACK_SECURITY_WEBHOOK" || echo 000)"
+              "$SLACK_SECURITY_WEBHOOK" || true)"
+            : "${http_code:=000}"
             if [ "$http_code" = "200" ]; then
               break
             fi
@@ -622,14 +643,32 @@ jobs:
           SHOULD_PAGE: ${{ steps.ioc-dedup.outputs.should_page }}
           DECISION_REASON: ${{ steps.ioc-dedup.outputs.decision_reason }}
         run: |
+          # SHOULD_PAGE is a tri-state output of the ioc-dedup step:
+          #   true  → Slack page step fired this run
+          #   false → Slack page step suppressed by dedup gate this run
+          #   ''    → ioc-dedup step did not produce outputs (e.g., the
+          #           step crashed under set -euo pipefail before writing
+          #           to $GITHUB_OUTPUT). The Slack page step's strict
+          #           `should_page == 'true'` gate then suppressed Slack;
+          #           the suppressed-by-dedup notice step's `!= 'true'`
+          #           gate fired ALSO. Surface this third state explicitly
+          #           rather than defaulting to "paged" — defaulting hid a
+          #           three-way contradiction between the Slack gate, the
+          #           suppression-notice gate, and this summary.
           case "${SWEEP_RC:-x}" in
             0) echo "::notice::Sweep clean (no findings)." ;;
             1)
-              if [ "${SHOULD_PAGE:-true}" = "true" ]; then
-                echo "::warning::Sweep produced IOC-grade findings; Slack paged (reason=${DECISION_REASON:-unknown}). See rolling issue + Slack."
-              else
-                echo "::warning::Sweep produced IOC-grade findings; Slack page deduped (reason=${DECISION_REASON:-dedup-skip}). See rolling issue; weekly re-page will fire if standing IOC persists."
-              fi
+              case "${SHOULD_PAGE:-}" in
+                true)
+                  echo "::warning::Sweep produced IOC-grade findings; Slack paged (reason=${DECISION_REASON:-unknown}). See rolling issue + Slack."
+                  ;;
+                false)
+                  echo "::warning::Sweep produced IOC-grade findings; Slack page deduped (reason=${DECISION_REASON:-dedup-skip}). See rolling issue; weekly re-page will fire if standing IOC persists."
+                  ;;
+                *)
+                  echo "::error::Sweep produced IOC-grade findings; Slack decision unavailable (ioc-dedup step did not produce outputs — likely crashed before writing GITHUB_OUTPUT). Investigate the ioc-dedup step in this run."
+                  ;;
+              esac
               ;;
             2) echo "::warning::Sweep produced operational findings only. See rolling issue." ;;
             *) echo "::error::Sweep failed to produce a meaningful exit code (rc='${SWEEP_RC:-unset}')." ;;
