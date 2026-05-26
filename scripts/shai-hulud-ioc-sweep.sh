@@ -49,7 +49,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-./.shai-hulud-sweep/$(date -u +%Y%m%d-%H%M%S)}"
 # Default trust allowlist matches REFERENCE.md's hardened CI workflow snippet.
 # Other orgs override via GO_TRUSTED_HOSTS_RE so they don't get false
 # `go_suspicious_replace` findings for their own GitHub mirrors.
-GO_TRUSTED_HOSTS="${GO_TRUSTED_HOSTS_RE:-github\.com/(allora-network|cosmos|ethereum|fluxcd)|gopkg\.in|google\.golang\.org|go\.uber\.org|k8s\.io|sigs\.k8s\.io|go\.opentelemetry\.io}"
+GO_TRUSTED_HOSTS="${GO_TRUSTED_HOSTS_RE:-github\.com/(allora-network|cometbft|cosmos|ethereum|fluxcd)|gopkg\.in|google\.golang\.org|go\.uber\.org|k8s\.io|sigs\.k8s\.io|go\.opentelemetry\.io}"
 GO_REPLACE_ALLOWED_FILE="${GO_REPLACE_ALLOWED_FILE:-}"
 
 [ -n "$ORG" ] || { echo "usage: $0 <org> [packages.txt] [hashes.txt]" >&2; exit 2; }
@@ -61,9 +61,15 @@ command -v jq >/dev/null   || { echo "jq required" >&2; exit 2; }
 # Schema-version assertion — a silent schema break in the sibling .github repo
 # (e.g. dropping the `ecosystem:` prefix) would otherwise corrupt parsing and
 # produce a false-clean sweep. Bump in lockstep when the seed-list format
-# changes.
+# changes. Both seed files (packages + hashes) carry the header so a future
+# reformat of either side fails loud instead of silently zero-matching against
+# the whole org.
 if ! head -n1 "$PACKAGES_FILE" | grep -qE '^#[[:space:]]*schema:v1'; then
   echo "IOC packages file $PACKAGES_FILE missing '# schema:v1' header — refusing to run (would silently false-clean on parser drift)." >&2
+  exit 2
+fi
+if ! head -n1 "$HASHES_FILE" | grep -qE '^#[[:space:]]*schema:v1'; then
+  echo "IOC hashes file $HASHES_FILE missing '# schema:v1' header — refusing to run (would silently false-clean on parser drift)." >&2
   exit 2
 fi
 
@@ -301,13 +307,24 @@ while IFS= read -r repo; do
     # false `persistence_workflow` (rule 3) or `go_unsafe_env` /
     # `go_unsafe_env_indirect` (rule 6) hits — those rules consume $WF_FILE /
     # $PERSIST_FILE populated here. See PRRT_kwDOQ91i5M6EVwmg / cubic#258.
+    #
+    # The persistence_workflow basename match is INTENTIONALLY narrowed to the
+    # exact filenames known to be dropped by the Shai-Hulud worm
+    # (`shai-hulud.yml`, `shai-hulud.yaml`, `shai-hulud-workflow.yml`,
+    # `shai-hulud-workflow.yaml`). A broader `shai-hulud*` glob would self-
+    # detect the legitimate defense workflow this script is invoked from
+    # (`.github/workflows/shai-hulud-sweep.yml` in this very repo) on every
+    # daily sweep, producing a guaranteed false IOC page that conditions
+    # responders to mute the channel — textbook alert fatigue. Keep this glob
+    # explicit; if a new worm variant ships a new filename, add it here
+    # rather than reverting to a wildcard.
     case "$path" in
       "$WORK/.github/workflows/"*)
         case "$bn" in
           *.yml|*.yaml)
             printf '%s\n' "$path" >> "$WF_FILE"
             case "$bn" in
-              shai-hulud*.yaml|shai-hulud*.yml)
+              shai-hulud.yml|shai-hulud.yaml|shai-hulud-workflow.yml|shai-hulud-workflow.yaml)
                 printf '%s\n' "$path" >> "$PERSIST_FILE" ;;
             esac
             ;;
