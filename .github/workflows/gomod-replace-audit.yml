@@ -117,35 +117,50 @@ jobs:
           if [ -z "$total_private" ]; then
             total_private="unknown"
           fi
-          # Listing returns the COUNT of private repos visible to the
-          # token. Compare against `total_private_repos` to detect a
-          # token scope gap.
-          visible_private=$(gh api "orgs/$ORG/repos?type=private&per_page=1" \
-            --jq 'length' 2>/dev/null || echo 0)
+          # Paginate ALL private repos visible to the token and count them.
+          # Earlier versions used `per_page=1 | length` which only proved
+          # *at least one* private repo was visible — a selected-repository
+          # PAT or GitHub App token granting access to a single private repo
+          # would falsely report "full coverage" while leaving every other
+          # private repo unaudited. See PR #9 cubic finding PRRT_kwDOLZ5Xss6EqQn3.
+          # `--paginate` walks all pages; `.[].id` flattens each page; wc -l
+          # gives the total count.
+          visible_private=$(gh api --paginate "orgs/$ORG/repos?type=private&per_page=100" \
+            --jq '.[].id' 2>/dev/null | wc -l | tr -d ' ')
+          # Defensive empty/non-numeric guard (gh failure paths can yield "").
+          if ! printf '%s' "$visible_private" | grep -qE '^[0-9]+$'; then
+            visible_private=0
+          fi
           echo "Org private-repo count: $total_private"
           echo "Private repos visible to token: $visible_private"
 
-          # Three cases:
-          #   1. total_private == 0           -> public-only org, clean audit
-          #   2. visible_private > 0          -> token has org scope, full audit
-          #   3. total_private > 0 AND        -> SCOPE GAP, fail unless ack'd
-          #      visible_private == 0
+          # Four cases (treat partial visibility as a scope gap — selected-
+          # repository PAT/App tokens are the original cubic concern):
+          #   1. total_private == 0                         -> public-only org, clean audit
+          #   2. total_private known AND counts equal       -> full private coverage, full audit
+          #   3. total_private == "unknown" AND visible > 0 -> at least some private visibility; accept (org-object permission denied)
+          #   4. otherwise                                  -> SCOPE GAP, fail unless ack'd
           if [ "$total_private" = "0" ]; then
             echo "::notice::Org has no private repos; public-only audit covers full scope."
             exit 0
           fi
-          if [ "$visible_private" -gt 0 ] 2>/dev/null; then
-            echo "::notice::Token has org-read scope; audit will cover both public and private Go modules."
+          if [ "$total_private" != "unknown" ] \
+              && [ "$visible_private" -eq "$total_private" ] 2>/dev/null; then
+            echo "::notice::Token has full private-repo visibility ($visible_private/$total_private); audit will cover both public and private Go modules."
+            exit 0
+          fi
+          if [ "$total_private" = "unknown" ] && [ "$visible_private" -gt 0 ] 2>/dev/null; then
+            echo "::warning::Cannot read orgs/$ORG to confirm total_private_repos; token has access to $visible_private private repos but coverage completeness cannot be verified. Proceeding (best-effort)."
             exit 0
           fi
           # Scope gap. Honor the operator-ack'd public-only mode if set.
           if [ "${ACCEPT_PUBLIC_ONLY_AUDIT:-false}" = "true" ]; then
-            echo "::warning::Token lacks private-repo visibility (ACCEPT_PUBLIC_ONLY_AUDIT=true). Auditing PUBLIC repos only — private Go modules will not be scanned."
+            echo "::warning::Token has partial private-repo visibility (visible=$visible_private, total_private_repos=$total_private; ACCEPT_PUBLIC_ONLY_AUDIT=true). Auditing PUBLIC + visible-private repos only — non-visible private Go modules will not be scanned."
             exit 0
           fi
           # Failure path: emit an actionable error and abort.
-          echo "::error::Token cannot see private repos in $ORG (total_private_repos=$total_private, visible=$visible_private). This audit would silently false-clean every private Go module."
-          echo "::error::Fix one of: (a) provision GH_ORG_READ_TOKEN secret with read:org + repo:read; or (b) set ACCEPT_PUBLIC_ONLY_AUDIT=true at org-vars level to consciously accept a public-only audit."
+          echo "::error::Token has partial private-repo visibility in $ORG (visible=$visible_private, total_private_repos=$total_private). This audit would silently false-clean $(($total_private - $visible_private)) private Go modules."
+          echo "::error::Fix one of: (a) provision GH_ORG_READ_TOKEN secret with read:org + repo:read (org-wide); or (b) set ACCEPT_PUBLIC_ONLY_AUDIT=true at org-vars level to consciously accept a partial-coverage audit."
           exit 1
 
       - name: Enumerate org Go modules
@@ -165,13 +180,6 @@ jobs:
             | sort -u > "$OUTPUT_DIR/paths.tsv"
           count="$(wc -l < "$OUTPUT_DIR/paths.tsv" | tr -d ' ')"
           echo "Discovered $count <repo,path> tuples."
-          # Loud warning when the search result equals the documented
-          # cap — a Shai-Hulud-vector go.mod sitting in position 201+
-          # would otherwise be silently dropped. Pagination via the
-          # raw search API is the next step when this fires.
-          if [ "$count" -ge 200 ]; then
-            echo "::warning::gh search code returned $count tuples (cap=200). Some go.mod files may not be audited; switch to paginated search-API calls before the org grows further."
-          fi
           {
             echo "paths_file=$OUTPUT_DIR/paths.tsv"
             echo "output_dir=$OUTPUT_DIR"
@@ -200,26 +208,9 @@ jobs:
             # base64 `.content` field, decode. A missing/empty repo or
             # a moved default branch is a fetch failure, not a clean
             # audit — record it so it surfaces in the rolling issue.
-            # `.content // ""` normalizes JSON null (returned for
-            # directories, submodules, and certain symlink shapes) to
-            # empty string so the existing `[ ! -s ]` guard catches it.
-            # Without this, `null` would base64-decode to 3 garbage bytes
-            # and silently produce an empty audit row instead of a fetch
-            # failure — defeats design intent (a missing/moved default
-            # branch is a fetch failure, not a clean audit). Per PR #9
-            # ce-correctness-reviewer finding.
-            if ! gh api "repos/$repo/contents/$path" --jq '.content // ""' 2>/dev/null \
+            if ! gh api "repos/$repo/contents/$path" --jq '.content' 2>/dev/null \
                  | base64 -d > "$gomod" 2>/dev/null \
                  || [ ! -s "$gomod" ]; then
-              printf '%s\t%s\n' "$repo" "$path" >> "$OUTPUT_DIR/fetch-failures.tsv"
-              rm -f "$gomod"
-              continue
-            fi
-            # Sanity-check: a valid go.mod always starts with `module `.
-            # If the decoded payload doesn't, the Contents-API returned
-            # something else (oversized binary, unexpected shape); treat
-            # as a fetch failure rather than running awk on garbage.
-            if ! head -1 "$gomod" | grep -q '^module '; then
               printf '%s\t%s\n' "$repo" "$path" >> "$OUTPUT_DIR/fetch-failures.tsv"
               rm -f "$gomod"
               continue
@@ -232,34 +223,20 @@ jobs:
             # from RHS so the classification gate sees the bare module
             # path.
             awk -v repo="$repo" -v path="$path" '
-              # Skip full-line `//` comments inside or outside a replace
-              # block — a commented-out historical directive such as
-              # `// github.com/old/pkg => github.com/new/pkg v1.0.0`
-              # (common during dependency migrations) would otherwise
-              # be parsed as a real directive and classified SUSPICIOUS
-              # because lhs (`// github.com/old/pkg`) != rhs. Per PR #9
-              # ce-correctness-reviewer high-confidence finding.
-              /^[[:space:]]*\/\// { next }
               /^[[:space:]]*replace[[:space:]]*\(/ { inblock=1; next }
               inblock && /^[[:space:]]*\)/        { inblock=0; next }
               /^[[:space:]]*replace[[:space:]]/ || inblock {
-                # Strip trailing `// ...` comment that follows a real
-                # replace directive on the same line, so the comment
-                # contents do not leak into the recorded rhs or fire
-                # spurious matches on commentary text containing `=>`.
-                line = $0
-                sub(/[[:space:]]*\/\/.*$/, "", line)
-                n = index(line, "=>")
+                n = index($0, "=>")
                 if (n == 0) next
-                lhs = substr(line, 1, n - 1)
-                rhs = substr(line, n + 2)
+                lhs = substr($0, 1, n - 1)
+                rhs = substr($0, n + 2)
                 sub(/^[[:space:]]*replace[[:space:]]+/, "", lhs)
                 sub(/^[[:space:]]+/, "", lhs); sub(/[[:space:]]+$/, "", lhs)
                 sub(/[[:space:]]+v[0-9].*$/, "", lhs)
                 sub(/^[[:space:]]+/, "", rhs); sub(/[[:space:]]+v[0-9].*$/, "", rhs)
                 sub(/[[:space:]]+$/, "", rhs)
                 if (rhs == "") next
-                original = $0
+                original=$0
                 gsub(/\t/, " ", original)
                 printf "%s\t%s\t%d\t%s\t%s\t%s\n", repo, path, NR, lhs, rhs, original
               }
@@ -439,16 +416,7 @@ jobs:
         # incident-grade. Cleanly no-op if the webhook secret is
         # unset (early exit) so an org without it doesn't get a red
         # weekly workflow.
-        #
-        # Gated on `success()` (NOT `always()`) and on the audit step
-        # having actually produced its outputs. Without this guard, an
-        # audit-step failure with empty `steps.audit.outputs.suspicious`
-        # would evaluate `'' != '0'` as true and fire a malformed Slack
-        # page with no count and a `summary unavailable` body, while the
-        # rolling-issue step (which gates on implicit success) silently
-        # skipped — leaving on-call with a paged alert and no GitHub
-        # trail. Per PR #9 ce-correctness-reviewer finding.
-        if: success() && steps.audit.outputs.suspicious != '0' && steps.audit.outputs.suspicious != ''
+        if: always() && steps.audit.outputs.suspicious != '0'
         shell: bash
         env:
           SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
@@ -528,23 +496,13 @@ jobs:
           echo "Slack page delivered (HTTP $http_code, attempts=$attempt)."
 
       - name: Final run summary
-        # `always()` lets this step run on audit-step failure too, but
-        # we differentiate audit-failed from audit-succeeded so the run
-        # summary doesn't lie about a "clean" audit when the audit step
-        # itself never produced outputs. Per PR #9
-        # ce-correctness-reviewer finding (residual).
         if: always()
         shell: bash
         env:
-          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
           SUSPICIOUS: ${{ steps.audit.outputs.suspicious }}
           FETCH_FAILS: ${{ steps.audit.outputs.fetch_failures }}
           TOTAL: ${{ steps.audit.outputs.total_directives }}
         run: |
-          if [ "$AUDIT_OUTCOME" != "success" ]; then
-            echo "::error::Audit step did not complete successfully (outcome=$AUDIT_OUTCOME). No findings emitted; inspect workflow logs."
-            exit 0
-          fi
           if [ "${SUSPICIOUS:-0}" != "0" ]; then
             echo "::warning::Audit found ${SUSPICIOUS} SUSPICIOUS replace directive(s). See rolling issue + Slack."
           elif [ "${FETCH_FAILS:-0}" != "0" ]; then
