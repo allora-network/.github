@@ -22,9 +22,30 @@ Linear: <https://linear.app/alloralabs/issue/DEVOP-560>
   workflow never auto-closes; humans drive close-and-reopen so triage state is
   preserved across runs.
 - **Slack alert path:** post the run summary to `SLACK_SECURITY_WEBHOOK` only
-  when the run produces **new** IOC findings (sweep exits 1). Operational
-  findings (clone_failed / check_skipped / go_local_replace, exit 2) update the
-  issue but do not page Slack.
+  when the run produces **new** IOC findings — defined as `rc == 1` AND
+  (no prior IOC-grade rolling-issue comment exists, OR today's IOC stamp
+  differs from the previous one, OR ≥ `WEEKLY_REPAGE_S` (7 days) have
+  elapsed since the last Slack page). Operational findings (clone_failed /
+  check_skipped / go_local_replace, exit 2) update the rolling issue but
+  do not page Slack. The dedup stamp is `sha256` of the sorted
+  `{repo, rule, path, detail}` TSV of IOC-grade rows from `findings.json`
+  (`ts` is intentionally excluded so an identical IOC set produces an
+  identical stamp across daily runs). Previous-run state is recovered
+  from hidden HTML markers embedded in the rolling-issue comment:
+  `<!-- shai-hulud-ioc-stamp: ... -->` (always on IOC-grade comments) and
+  `<!-- shai-hulud-paged-at: ... -->` (only on comments where Slack was
+  actually paged, so a deduped run preserves the older real timestamp
+  and the weekly re-page window stays honest). Do NOT regress this to a
+  bare `if: rc == '1'` Slack gate — that's the alert-fatigue regression
+  surfaced by cubic (`PRRT_kwDOLZ5Xss6Ee5gN`) and corroborated by four
+  ce-code-review reviewers (anchor 100). A standing unresolved IOC pages
+  daily under bare gating and conditions responders to mute the channel.
+  Both the dedup gate AND the weekly re-page are required: bare dedup
+  without re-page lets a forgotten standing IOC silently age out forever.
+  IOC_RULES_RE in the workflow's dedup step MUST stay in sync with
+  `scripts/shai-hulud-ioc-sweep.sh` (search for `IOC_RULES_RE`) — drift
+  would either mis-dedup a real new IOC or re-page on operational-only
+  changes that didn't bump the stamp.
 - **Schedule:** `cron: '7 4 * * *'` (04:07 UTC, off-peak + off-minute), plus
   `workflow_dispatch` for manual / debugging runs.
 - **Permissions:** `contents: read` + `issues: write`. No other scopes.
