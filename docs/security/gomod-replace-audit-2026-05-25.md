@@ -99,6 +99,35 @@ No findings in this audit fell into the `SUSPICIOUS` or `investigate-absolute` c
    version pins from the cosmos/simapp pattern. Re-audit on the next
    weekly run; escalate any new entry that breaks the same-path pattern.
 
+## Cross-pipeline follow-ups (deferred — not blocking this PR)
+
+The following items surfaced during PR #9 ce-code-review require touching
+the sibling DEVOP-560 PR's files (`scripts/shai-hulud-ioc-sweep.sh`,
+`shai-hulud-defense/REFERENCE.md`) or adding new test infrastructure.
+Tracking here so they don't fall off the radar:
+
+- **Extract `GO_TRUSTED_HOSTS_RE` to a single committed text file**
+  (e.g. `.github/security/go-trusted-hosts.regex`) so the workflow,
+  `shai-hulud-ioc-sweep.sh`, and `REFERENCE.md` all consume the same
+  source. Today the regex lives in three places with a "must match"
+  comment instead of structural enforcement — the first cometbft
+  allowlist edit will fan out across all three.
+- **Extract the awk `replace`-directive extractor to
+  `scripts/extract-go-replace.awk`** so both this workflow and the
+  daily sweep parse go.mod with the same code path.
+- **Add fixture-based parser tests** under `scripts/test-fixtures/`
+  covering: single-line replace, `replace (...)` block, commented
+  historical replace inside a block (false-positive vector), trailing
+  `// comment` after a single-line replace, blank lines inside blocks,
+  CRLF / UTF-8 BOM, and the full classification matrix
+  (`legitimate-*` × `investigate-*` × `SUSPICIOUS`).
+- **Add a regex lookalike-bypass corpus test** asserting positives
+  (`github.com/allora-network/x`, `gopkg.in/x`, `k8s.io`) and negatives
+  (`github.com/allora-network-evil/x`, `gopkg.in.attacker.com/x`,
+  `evil.gopkg.in/x`, `github.com/cosmosmalicious/x`) all classify
+  correctly. The `(/|$)` boundary anchor is load-bearing; protect it
+  with CI.
+
 ## Cross-reference
 
 - `.github/security/REFRESH.md` — IOC seed-list refresh cadence.
