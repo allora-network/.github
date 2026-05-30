@@ -14,7 +14,11 @@ NetworkPolicies are stateless and additive — meaning a `default-deny` policy w
 
 - [ ] Confirm CNI on every cluster supports NetworkPolicy (Calico, Cilium, Antrea — yes; flannel without --network-policy — no).
 - [ ] Stand up `network-policy-engine` (Calico) or use Cilium's native NPL on any cluster that's still on flannel.
-- [ ] Enable flow logs on at least one staging cluster: `cilium hubble enable` or `calicoctl flow logs enable`. We need ~7 days of baseline traffic to enumerate legitimate egress.
+- [ ] Enable flow logs on at least one staging cluster: `cilium hubble enable` or `calicoctl flow logs enable`. We need ~7 days of baseline traffic to enumerate legitimate egress. Note: these are L3/L4 logs — they give source/destination IP, port, and protocol only, **not** FQDNs.
+- [ ] Enable verbose DNS query logging on the same cluster so Phase 1 can map destination IPs back to FQDNs. Concretely:
+  - CoreDNS: add the `log` plugin to the Corefile (`log { class denial error success }`) and ship CoreDNS logs to the same sink as the flow logs so they can be joined on `(srcPodIP, dstIP, timestamp ± window)`.
+  - On Cilium clusters where we plan to author DNS-aware policies anyway, enable Cilium L7 DNS visibility (`hubble observe --type=dns` works once the DNS proxy is in path) — this gives per-pod resolved FQDNs directly and removes the join step.
+  - Confirm log retention covers the full 7-day baseline window before Phase 1 starts.
 
 ## Phase 1 — Discovery (week 1, days 3–5; week 2, days 1–2)
 
@@ -30,7 +34,8 @@ For each namespace, in priority order (highest-value first):
 
 For each:
 - [ ] Capture 7 days of egress flow logs from baseline.
-- [ ] Enumerate destination CIDRs, DNS names, and ports.
+- [ ] Enumerate destination CIDRs and ports directly from the flow logs (these are the only fields L3/L4 actually carries).
+- [ ] Resolve those destinations to FQDNs by joining the flow logs against the CoreDNS query logs (or Cilium L7 DNS events) enabled in Phase 0, on `(srcPodIP, dstIP)` within a short time window. Destinations that have no matching DNS lookup (e.g., hard-coded IP literals, `169.254.169.254`, raw cloud-metadata IPs) get carried through as IP-only entries and are scrutinized in the suspect-destination step below.
 - [ ] Group by category: `internal` (other Allora namespaces), `infra` (cloud-provider metadata, DNS, NTP, GKE), `vendor-saas` (Datadog, Slack, etc.), `package-registries` (npm, pypi, docker.io, ghcr.io, quay.io — these become Harbor proxy-cache after DEVOP-589), `customer-traffic` (per-namespace).
 - [ ] **Explicitly flag suspect egress destinations** for incident review before they get added to any allowlist. Treat the following as suspect by default:
   - Generic webhook receivers (`*.webhook.site`, `discord.com/api/webhooks/*`, `hooks.slack.com/services/*` that aren't ours, `*.pipedream.net`, `*.requestbin.com`, etc.).
