@@ -80,6 +80,27 @@ section it exercises. The facilitator notes elapsed time as participants
 move into each phase. The 30-minute target covers Phases 1–4; Phases 5
 and 6 happen after the clock stops.
 
+**Wall-clock layout:**
+
+```
+T+0           Exercise clock starts on first `ack`.
+T+30          Clock stops at end of Phase 4 (clean-republish target).
+T+30 → T+60   Debrief (§5). Phase 5 token-rotation walk runs in
+              parallel with the debrief and concludes whenever the
+              rotation list is exhausted.
+after T+60    Phase 6 post-mortem draft, once Phase 5 is done.
+```
+
+**Sim-vs-real rule (every phase).** Read-only commands — `gh search`,
+`gh api`, `kubectl get`, reading workflow YAML, listing secrets — are
+run for real against live infrastructure. Anything that would mutate
+state — `npm publish`, `npm deprecate`, `npm unpublish`, the actual
+GHA release run, sending the advisory or the consumer notification —
+is pasted in chat as the executor would type it but **not executed**.
+The exercise is a Slack-channel walkthrough, not a live production
+action. If you are unsure whether a command is sim or real, default
+to sim and ask in channel.
+
 ### Phase 1 — Detection + triage (target: T+5 min)
 
 Runbook §1–2.
@@ -104,8 +125,8 @@ Runbook §5 step 1.
 
 - [ ] Lead instructs executor to deprecate the published versions on
   npm. Executor types the exact `npm deprecate` invocation; lead
-  confirms before executor "runs" it (the executor pastes the command
-  in chat; we don't actually run it).
+  confirms before executor "runs" it. (Per the §4 sim-vs-real rule
+  this is a state-changing command — pasted only, not executed.)
 - [ ] Lead decides whether to attempt `npm unpublish` of the bad
   versions (within the 72-hour window). This is a per-version
   unpublish, NOT a full-package delete; the runbook scopes the
@@ -168,9 +189,8 @@ Runbook §5 steps 4–7.
 - [ ] Lead cuts a fresh minor bump tag — describes the tag name and
   the workflow that will fire.
 - [ ] Executor "monitors" the workflow run; calls out each step
-  completing (this is acted out; we don't actually publish).
-- [ ] Communicator sends the advisory and the consumer notification
-  (both into chat — we don't actually send).
+  completing.
+- [ ] Communicator sends the advisory and the consumer notification.
 
 **Success:** within 30 minutes of T+0, a clean version is "published"
 and the advisory + notification are out.
