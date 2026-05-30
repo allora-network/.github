@@ -12,9 +12,12 @@ NetworkPolicies are stateless and additive — meaning a `default-deny` policy w
 
 ## Phase 0 — Pre-flight (week 1, days 1–2)
 
-- [ ] Confirm CNI on every cluster supports NetworkPolicy (Calico, Cilium, Antrea — yes; flannel without --network-policy — no).
-- [ ] Stand up `network-policy-engine` (Calico) or use Cilium's native NPL on any cluster that's still on flannel.
-- [ ] Enable flow logs on at least one staging cluster: `cilium hubble enable` or `calicoctl flow logs enable`. We need ~7 days of baseline traffic to enumerate legitimate egress. Note: these are L3/L4 logs — they give source/destination IP, port, and protocol only, **not** FQDNs.
+- [ ] Confirm CNI on every cluster supports NetworkPolicy (Calico with Felix as the enforcer — yes; Cilium — yes, native; Antrea — yes; flannel without the `--network-policy` flag — no).
+- [ ] For any cluster still on flannel-without-NetworkPolicy, plan a CNI migration to Calico or Cilium before proceeding. NetworkPolicy enforcement is unavailable otherwise; this rollout cannot land on those clusters until the CNI migration is done.
+- [ ] Enable flow logs on at least one staging cluster. We need ~7 days of baseline traffic to enumerate legitimate egress. Note: these are L3/L4 logs — they give source/destination IP, port, and protocol only, **not** FQDNs. CNI-specific enablement:
+  - Cilium: `cilium hubble enable` (and ensure flow retention covers 7 days; `hubble-relay` persists in-memory by default, so for the baseline window export to a sink the team can query later — Loki, S3, or BigQuery).
+  - Calico OSS: patch the `default` `FelixConfiguration` CR with `spec.flowLogsFileEnabled: true` (plus `flowLogsFileIncludeLabels: true` so workload identity is queryable). Felix writes per-node JSON flow logs under `/var/log/calico/flowlogs/`; ship those to the same sink as above. OSS file-based flow logs cover allow/deny actions only — for richer flow context, Calico Enterprise / Calico Cloud is required, otherwise prefer the Cilium staging cluster for baseline capture.
+  - Antrea: enable the `FlowExporter` feature gate on the agent and run `flow-aggregator` to export to the sink.
 - [ ] Enable verbose DNS query logging on the same cluster so Phase 1 can map destination IPs back to FQDNs. Concretely:
   - CoreDNS: add the `log` plugin to the Corefile (`log { class denial error success }`) and ship CoreDNS logs to the same sink as the flow logs so they can be joined on `(srcPodIP, dstIP, timestamp ± window)`.
   - On Cilium clusters where we plan to author DNS-aware policies anyway, enable Cilium L7 DNS visibility (`hubble observe --type=dns` works once the DNS proxy is in path) — this gives per-pod resolved FQDNs directly and removes the join step.
