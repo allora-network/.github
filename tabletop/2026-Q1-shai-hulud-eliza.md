@@ -35,10 +35,7 @@ script every participant runs against.
 > `postinstall` script that:
 >
 > 1. Reads `~/.npmrc` and exfils any `_authToken` to a CloudFlare worker
->    at `https://exfil.example.invalid/intake`. (The host is a
->    deliberately non-resolvable RFC-2606 / RFC-6761 placeholder so
->    this URL can never become a live IOC by accident, and so no
->    real `*.workers.dev` subdomain is named in a public security doc.)
+>    at `https://exfil.example.invalid/intake`.
 > 2. Mines local `.git/config` for credentials helpers (macOS keychain,
 >    libsecret) and exfils what it finds.
 > 3. Republishes itself with a new bumped version (`<latest>.1`)
@@ -209,9 +206,11 @@ and the advisory + notification are out.
   the cleanest available environment regardless of clock pressure.
 - Lead picks a new version number without explicitly stating it in
   channel and justifying that it cannot collide with any version
-  already published or yanked. (The facilitator's silent test:
-  if the lead does not articulate the new version *and* its
-  non-collision rationale, that is the failure — do not prompt them.)
+  already published or unpublished (npm-only scenario; the PyPI
+  equivalent is "released or yanked" but is not in scope here).
+  The facilitator's silent test: if the lead does not articulate the
+  new version *and* its non-collision rationale, that is the failure
+  — do not prompt them.
 
 ### Phase 5 — Token rotation (T+30 onward, runs in parallel with the debrief)
 
@@ -232,12 +231,14 @@ Runbook §1 close-out + general post-mortem template.
     had `NPM_TOKEN` written before install (or had `ignore-scripts`
     not enforced, or had no Trusted Publisher migration done).
     Whichever — pick what's plausibly still true given current state.
-  - Detection-to-mitigation timeline. (Pull each timestamp from the
-    channel transcript and from the injected scenario in §2; compute
-    the gap between bad-version publish and the team's first `ack`.
-    Identify the single largest latency in that timeline and call it
-    out as the headline finding. The post-mortem template must not
-    pre-name the answer — let it fall out of the math during debrief.)
+  - Detection-to-mitigation timeline.
+    - _How to compute it (facilitator note — for the lead's working
+      math, not for the post-mortem template itself):_ pull every
+      timestamp from the channel transcript and from §2 (bad-version
+      publish, Socket advisory flag, IOC sweep open, team's first
+      `ack`, deprecate, unpublish decision, clean republish). Compute
+      each consecutive gap. The largest gap is the headline finding;
+      do not pre-name it — let the math during debrief surface it.
   - Action items: file each gap as a Linear ticket.
 
 ---
@@ -313,6 +314,13 @@ runbook and have opinions about where the seams are:
   The runbook §5 covers PyPI yank steps as well; if anyone
   reflexively reaches for the PyPI workflow during this exercise,
   log it as a runbook-clarification ticket about scenario scoping.
+- **Why the exfil URL is `exfil.example.invalid`.** RFC-2606
+  reserves `.invalid` and `.example` so the host is permanently
+  non-resolvable. We avoid naming any real `*.workers.dev`
+  subdomain in a public security doc — it would either implicate
+  a current owner or invite someone to register the name and grep
+  for hits. If you adapt this scenario, keep the exfil host on a
+  reserved TLD.
 
 ---
 
