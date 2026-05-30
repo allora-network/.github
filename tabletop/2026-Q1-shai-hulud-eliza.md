@@ -135,13 +135,6 @@ Runbook §5 step 1.
   decline until "publisher and on-call agree, in writing, in
   `#security-alerts`" is captured in channel — and that gate must
   not fire in this exercise.)
-- [ ] Executor "yanks" the version on PyPI via the web UI (described
-  in chat). N/A for this scenario but let's verify the team remembers
-  it's npm-only here.
-- [ ] Executor lists which Harbor / ECR registry repos contain images
-  built from this package (`gh search code` on the package name in
-  Dockerfiles + package.jsons across the org).
-
 **Success:** within 10 minutes, both bad versions are deprecated and
 the per-version `npm unpublish` decision (yes/no) has been made and
 announced in channel by the lead. The lead owns this call; no
@@ -161,9 +154,12 @@ scenarios here).
 
 - [ ] Executor lists every secret the publish workflow could have
   read. Communicator drafts the rotation tickets.
-- [ ] Executor `gh search`es for every consumer repo. Lead decides
-  which consumer repos need pin PRs filed and which can wait for
-  the daily sweep to surface them.
+- [ ] Executor `gh search`es for every consumer repo (`package.json`
+  dependencies and `Dockerfile` references) and lists which Harbor /
+  ECR registry repos contain images built from this package. Lead
+  decides which consumer repos need pin PRs filed, which images need
+  rebuild tickets, and which can wait for the daily sweep to surface
+  them.
 - [ ] Communicator drafts the GitHub security advisory (paste the
   draft into chat for review).
 - [ ] Communicator drafts the downstream-consumer notification.
@@ -298,6 +294,10 @@ runbook and have opinions about where the seams are:
   service → Close-out" rhythm is the most opinionated structural
   choice. Watch whether participants use that vocabulary or
   default to ad-hoc language. Adoption of the rhythm is the test.
+- **Cross-registry muscle memory.** This scenario is npm-only.
+  The runbook §5 covers PyPI yank steps as well; if anyone
+  reflexively reaches for the PyPI workflow during this exercise,
+  log it as a runbook-clarification ticket about scenario scoping.
 
 ---
 
