@@ -51,14 +51,25 @@ For each:
 
 ## Phase 2 — Allowlist authoring (week 2, days 3–5)
 
-Per namespace, write two files:
-- `network-policies/<cluster>/<namespace>/default-deny.yaml` — applies to all pods in the namespace, blocks all egress except DNS.
-- `network-policies/<cluster>/<namespace>/allowlist.yaml` — explicit egress rules derived from Phase 1.
+### NetworkPolicy naming convention (pinned — runbook depends on it)
 
-Patterns to standardize:
-- DNS always allowed to kube-dns / coredns (53/udp, 53/tcp).
-- NTP always allowed (123/udp).
-- Cluster-internal pod-to-pod within same namespace: allow by default.
+Every NetworkPolicy this rollout creates uses one of these exact `metadata.name` values, in the namespace it targets. The rollback runbook (Phase 3) and the Kyverno asserter (Phase 4) both grep on these names, so deviations break both.
+
+| Direction | File name | `metadata.name` | Purpose |
+|---|---|---|---|
+| Egress | `default-deny-egress.yaml` | `default-deny-egress` | Deny all egress except the baseline allows in `egress-baseline-allow.yaml`. |
+| Egress | `egress-baseline-allow.yaml` | `egress-baseline-allow` | Cluster-wide always-on allows: DNS to kube-dns / CoreDNS (53/udp, 53/tcp) and NTP (123/udp). Lives in every namespace so clock sync and name resolution survive the default-deny. |
+| Egress | `egress-allowlist.yaml` | `egress-allowlist` | Per-namespace workload-specific egress allows derived from Phase 1. |
+| Ingress | `default-deny-ingress.yaml` | `default-deny-ingress` | Deny all ingress except the baseline allows below. |
+| Ingress | `ingress-allowlist.yaml` | `ingress-allowlist` | Per-namespace ingress allows (ingress controller, same-namespace pods, explicit upstreams). |
+
+Per namespace, write the two egress files (`default-deny-egress.yaml` plus `egress-allowlist.yaml`) under `network-policies/<cluster>/<namespace>/`. The baseline-allow policy is generated from a single template applied to every namespace; do not hand-author it per-namespace.
+
+### Patterns derived from Phase 1
+
+- DNS to kube-dns / CoreDNS (53/udp, 53/tcp): lives in `egress-baseline-allow`, never in per-workload allowlists.
+- NTP (123/udp): lives in `egress-baseline-allow`.
+- Cluster-internal pod-to-pod within same namespace: allow by default in the per-namespace `egress-allowlist`.
 - Outbound to other Allora namespaces: explicit per-namespace allow (no blanket).
 - Outbound to public internet: only through a designated egress proxy (or whitelist by CIDR).
 
@@ -80,14 +91,16 @@ window open until the root cause is fixed (or the policy is amended)
 and restart the 48-hour clock for that stage.
 
 **Rollback procedure** (must be documented before Day 1):
-- `kubectl delete networkpolicy default-deny -n <ns>` — un-breaks egress instantly.
-- Have this command ready as a runbook step in the on-call channel.
+- Egress emergency: `kubectl delete networkpolicy default-deny-egress -n <ns>` — restores all egress instantly. The per-namespace `egress-allowlist` and the `egress-baseline-allow` policies are additive-only and safe to leave in place.
+- Ingress emergency (once Phase 3 has rolled the ingress cohort): `kubectl delete networkpolicy default-deny-ingress -n <ns>` — restores all ingress instantly.
+- Both names match the pinned naming convention in Phase 2. If you find a workload whose `default-deny-egress` policy has a different name, treat it as a policy-drift incident and fix the name before relying on the rollback command.
+- Have both commands ready as runbook steps in the on-call channel.
 
 ## Phase 4 — Steady state
 
-- [ ] Add NetworkPolicy schemas to Kyverno (after DEVOP-588 lands) so any new namespace without a `default-deny` is auto-flagged.
+- [ ] Add Kyverno policies (after DEVOP-588 lands) that fail any new non-system namespace which is missing either a `default-deny-egress` or a `default-deny-ingress` NetworkPolicy. Match by `metadata.name` exactly — these are the names pinned in the Phase 2 convention table.
 - [ ] Monthly review of `discovery/<namespace>.md` for changes in legitimate egress (new vendor SaaS, etc.).
-- [ ] **Document the rollout and steady-state policies in `SECURITY-RUNBOOK.md`** (DEVOP-571): add a NetworkPolicy section covering (a) the default-deny model, (b) where the per-namespace allowlists live in this repo, (c) the rollback command (`kubectl delete networkpolicy default-deny -n <ns>`), and (d) the on-call escalation path when a workload reports egress failures. Without this hook into the runbook, on-call has no reference for diagnosing "my pod can't reach X" pages once default-deny is org-wide.
+- [ ] **Document the rollout and steady-state policies in `SECURITY-RUNBOOK.md`** (DEVOP-571): add a NetworkPolicy section covering (a) the default-deny model, (b) where the per-namespace allowlists live in this repo, (c) the rollback commands (`kubectl delete networkpolicy default-deny-egress -n <ns>` and `kubectl delete networkpolicy default-deny-ingress -n <ns>` — both required, named per the Phase 2 convention), and (d) the on-call escalation path when a workload reports egress or ingress failures. Without this hook into the runbook, on-call has no reference for diagnosing "my pod can't reach X" pages once default-deny is org-wide.
 
 ## Dependencies
 
@@ -113,18 +126,22 @@ For ingress, mirror Phases 0–4 above with these substitutions:
   reviewed before allowlisting.
 - **Phase 2 (allowlist authoring)**: per namespace, write
   `network-policies/<cluster>/<namespace>/default-deny-ingress.yaml`
-  plus `ingress-allowlist.yaml`. Pattern: deny all inbound by default,
-  allow from the ingress controller's pod selector, allow from
-  same-namespace pods, then explicit allow rules per legitimate
-  upstream.
+  (`metadata.name: default-deny-ingress`) plus
+  `ingress-allowlist.yaml` (`metadata.name: ingress-allowlist`). Both
+  names match the pinned convention in the egress Phase 2 table.
+  Pattern: deny all inbound by default, allow from the ingress
+  controller's pod selector, allow from same-namespace pods, then
+  explicit allow rules per legitimate upstream.
 - **Phase 3 (staged rollout)**: same 48-hour soak windows. Ingress
   blast radius is generally *higher* than egress (a misconfigured
   ingress policy can take a service offline for real users, not just
   internal callouts), so the production cohort starts later and
   proceeds slower than egress.
-- **Phase 4 (steady state)**: Kyverno rule asserting both
-  `default-deny-egress` AND `default-deny-ingress` exist per namespace.
-  Runbook section covers both.
+- **Phase 4 (steady state)**: Kyverno rule asserting that every
+  non-system namespace has both a `default-deny-egress` and a
+  `default-deny-ingress` NetworkPolicy (greps on the pinned
+  `metadata.name` values from the Phase 2 table). Runbook section
+  covers both rollback commands.
 
 Run egress first (it's lower-risk because the failure mode is
 "workload can't reach Datadog" rather than "customers can't reach our
