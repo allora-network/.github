@@ -1,8 +1,12 @@
 # Tabletop exercise: `eliza-allora-plugin` poisoned publish
 
 **Scheduled for:** TBD — first available 90-minute slot in 2026 Q1.
-Facilitator (DevOps on-call) to schedule and announce in
-`#security-alerts` at least 2 weeks before.
+Facilitator (a DevOps engineer who is **not** the current on-call —
+typically the runbook author or last quarter's facilitator) schedules
+and announces in `#security-alerts` at least 2 weeks before. The
+incident-lead role belongs to whichever DevOps engineer is on-call
+at exercise start time, which must not be the same person as the
+facilitator.
 **Duration:** 90 minutes (60 min exercise + 30 min debrief).
 **Stakes:** zero production impact — pure simulation in a Slack channel.
 **Reference:** [`SECURITY-RUNBOOK.md`](../SECURITY-RUNBOOK.md) is the
@@ -55,7 +59,8 @@ exercise clock starts when the first participant types `ack`.
 
 | Role | Assigned to | What they do during the exercise |
 |---|---|---|
-| **Incident lead** | DevOps on-call | Calls the shots. Reads the runbook. Decides when to escalate. They are responsible for the timeline. |
+| **Facilitator** | A DevOps engineer who is **not** the current on-call (runbook author or previous facilitator) | Runs the exercise from outside the in-character roster. Pastes the injected scenario, holds the stopwatch, watches for failure modes, runs the debrief. Never plays the lead — that defeats the test. |
+| **Incident lead** | The DevOps engineer on-call **at exercise start time** (not the facilitator) | Calls the shots. Reads the runbook. Decides when to escalate. They are responsible for the timeline. |
 | **Communicator** | A different DevOps engineer | Owns external comms — drafts the GitHub security advisory, the downstream-consumer email, the Slack updates. Does NOT execute commands. |
 | **Executor** | A third DevOps engineer | Runs every `gh`, `npm`, `kubectl`, and `cosign` command the lead asks for. Pastes output back to the channel. Does NOT make decisions; if the lead's instruction is ambiguous, asks. |
 | **Backend rep** | One backend engineer | Represents the consumer-of-this-package perspective. When the communicator drafts the downstream notification, the backend rep reads it as if it landed in their inbox and pushes back on anything unclear. |
