@@ -65,7 +65,7 @@ exercise clock starts when the first participant types `ack`.
 | **Executor** | A third DevOps engineer | Runs every `gh`, `npm`, `kubectl`, and `cosign` command the lead asks for. Pastes output back to the channel. Does NOT make decisions; if the lead's instruction is ambiguous, asks. |
 | **Backend rep** | One backend engineer | Represents the consumer-of-this-package perspective. When the communicator drafts the downstream notification, the backend rep reads it as if it landed in their inbox and pushes back on anything unclear. |
 | **Frontend rep** | One frontend engineer | Same, but for the frontend-side dependency story. (`eliza-allora-plugin` is a dev-tool; both BE and FE consume.) |
-| **Founder observer** | One of the founders | Silent observer by default. Their job is to confirm the team can run this without exec involvement during a real incident, so they DO NOT participate in decisions or commentary. The one exception: the runbook's "destructive action" gate (full-package `unpublish`/delete) requires the on-call founder's written approval per `SECURITY-RUNBOOK.md` §5. If the team reaches for that gate they may break silence to ack/deny — and only for that. Otherwise they take notes. |
+| **Founder observer** | One of the founders | Silent observer. Their only job is to confirm the team can run this without exec involvement during a real incident, so they DO NOT participate in decisions, commentary, or approvals. (The runbook's destructive-action gate — full-package unpublish/delete, runbook §5 step 1 — requires "publisher and on-call agree, in writing, in `#security-alerts`," not founder approval; the founder observer is therefore not in the authority chain for any phase of this exercise.) They take notes for the debrief. |
 
 If someone is missing on the day, **postpone**. Skipping a role to run
 the exercise on schedule defeats the purpose; reschedule rather than
@@ -129,11 +129,12 @@ Runbook §5 step 1.
   this is a state-changing command — pasted only, not executed.)
 - [ ] Lead decides whether to attempt `npm unpublish` of the bad
   versions (within the 72-hour window). This is a per-version
-  unpublish, NOT a full-package delete; the runbook scopes the
-  founder-approval gate to full-package deletion only, so the lead
-  owns this call. The founder observer notes whether the lead
-  surfaces the decision clearly in channel rather than slipping it
-  past unannounced.
+  unpublish, which the lead owns directly — no separate authorization
+  is required. (Full-package deletion is a separate, forbidden action
+  per runbook §5 step 1; if anyone reaches for it, the executor must
+  decline until "publisher and on-call agree, in writing, in
+  `#security-alerts`" is captured in channel — and that gate must
+  not fire in this exercise.)
 - [ ] Executor "yanks" the version on PyPI via the web UI (described
   in chat). N/A for this scenario but let's verify the team remembers
   it's npm-only here.
@@ -142,10 +143,11 @@ Runbook §5 step 1.
   Dockerfiles + package.jsons across the org).
 
 **Success:** within 10 minutes, both bad versions are deprecated and
-the unpublish decision (yes/no) has been made and announced in
-channel by the lead. Founder approval is NOT required for the
-per-version unpublish call; it would only be required if the team
-escalated to a full-package delete, which the runbook forbids here.
+the per-version `npm unpublish` decision (yes/no) has been made and
+announced in channel by the lead. The lead owns this call; no
+separate authorization is required. The runbook's destructive-action
+gate (publisher + on-call written agreement) applies only to
+full-package deletion, which this scenario forbids.
 
 **Failure mode:** the team tries to *delete* the package entirely
 rather than deprecate-and-unpublish. The runbook explicitly forbids
@@ -281,9 +283,11 @@ runbook and have opinions about where the seams are:
 
 - **§5 Scenario C step 1** is the most decision-dense moment. The
   npm deprecate vs. unpublish vs. delete decision is the one place
-  the runbook tries to constrain authority via the founder-approval
-  gate. Watch whether the team actually reaches for that gate or
-  routes around it.
+  the runbook constrains authority — per-version `npm unpublish` is
+  the lead's call (no extra gate); full-package deletion is gated on
+  "publisher and on-call agree, in writing, in `#security-alerts`"
+  and is forbidden in this scenario. Watch whether the team
+  articulates that gate correctly or routes around it.
 - **§7 Token rotation** is long. Watch whether the team
   systematically walks the table or skips around. Skipping leads to
   missed rotations; that's a known failure mode.
