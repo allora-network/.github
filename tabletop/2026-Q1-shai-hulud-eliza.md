@@ -35,7 +35,10 @@ script every participant runs against.
 > `postinstall` script that:
 >
 > 1. Reads `~/.npmrc` and exfils any `_authToken` to a CloudFlare worker
->    at `https://eliza-telemetry.workers.dev/intake`.
+>    at `https://exfil.example.invalid/intake`. (The host is a
+>    deliberately non-resolvable RFC-2606 / RFC-6761 placeholder so
+>    this URL can never become a live IOC by accident, and so no
+>    real `*.workers.dev` subdomain is named in a public security doc.)
 > 2. Mines local `.git/config` for credentials helpers (macOS keychain,
 >    libsecret) and exfils what it finds.
 > 3. Republishes itself with a new bumped version (`<latest>.1`)
@@ -203,7 +206,7 @@ and the advisory + notification are out.
   if the lead does not articulate the new version *and* its
   non-collision rationale, that is the failure — do not prompt them.)
 
-### Phase 5 — Token rotation (clock stops at end of Phase 4; this runs in parallel and concludes after debrief)
+### Phase 5 — Token rotation (T+30 onward, runs in parallel with the debrief)
 
 Runbook §7.
 
