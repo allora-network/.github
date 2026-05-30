@@ -197,8 +197,11 @@ and the advisory + notification are out.
 - Lead tries to republish from a local machine because it's "faster" —
   this is the worst failure mode of this exercise. Lead must reach for
   the cleanest available environment regardless of clock pressure.
-- Lead reuses the bad version number (npm + PyPI both block this; the
-  test is whether the team remembers without being told).
+- Lead picks a new version number without explicitly stating it in
+  channel and justifying that it cannot collide with any version
+  already published or yanked. (The facilitator's silent test:
+  if the lead does not articulate the new version *and* its
+  non-collision rationale, that is the failure — do not prompt them.)
 
 ### Phase 5 — Token rotation (clock stops at end of Phase 4; this runs in parallel and concludes after debrief)
 
@@ -219,10 +222,12 @@ Runbook §1 close-out + general post-mortem template.
     had `NPM_TOKEN` written before install (or had `ignore-scripts`
     not enforced, or had no Trusted Publisher migration done).
     Whichever — pick what's plausibly still true given current state.
-  - Detection-to-mitigation timeline (T+0 was the daily sweep, but
-    the actual exfil started 16 hours earlier when the bad version
-    was published — that 16-hour blind spot is the most important
-    finding).
+  - Detection-to-mitigation timeline. (Pull each timestamp from the
+    channel transcript and from the injected scenario in §2; compute
+    the gap between bad-version publish and the team's first `ack`.
+    Identify the single largest latency in that timeline and call it
+    out as the headline finding. The post-mortem template must not
+    pre-name the answer — let it fall out of the math during debrief.)
   - Action items: file each gap as a Linear ticket.
 
 ---
