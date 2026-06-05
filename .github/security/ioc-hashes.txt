@@ -1,0 +1,51 @@
+# IOC SHA-256 hash list — known Shai-Hulud dropper payloads.
+#
+# Format: one lowercase hex SHA-256 per line, optional `# comment` after.
+# Consumed by .github/workflows/shai-hulud-sweep.yml (DEVOP-560), which
+# matches these against artifacts checked into repos (lockfile inline blobs,
+# vendored bundles, anything tarball-extracted to disk during CI).
+#
+# Refresh: ad-hoc on advisory publication; weekly from Socket + Datadog IOC repo.
+#
+# Last refreshed: 2026-05-13 (DEVOP-561)
+# Sources:
+#   - Socket: "Updated and Ongoing Supply Chain Attack Targets CrowdStrike NPM
+#     Packages" — canonical V1–V7 bundle.js hashes for the Sept 2025 wave.
+#       https://socket.dev/blog/ongoing-supply-chain-attack-targets-crowdstrike-npm-packages
+#   - Socket: "Shai Hulud Strikes Again (v2)" — Nov 2025 second-wave context.
+#       https://socket.dev/blog/shai-hulud-strikes-again-v2
+#   - Datadog Security Labs: "The Shai-Hulud 2.0 npm worm: analysis"
+#     and the IOC repo at github.com/DataDog/indicators-of-compromise/tree/main/shai-hulud-2.0
+#     — canonical SHA-256s for setup_bun.js / bun_environment.js (Nov 2025).
+#       https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/
+#   - StepSecurity, Unit 42 (Palo Alto Networks) — corroboration for V6 hash.
+#       https://www.stepsecurity.io/blog/ctrl-tinycolor-and-40-npm-packages-compromised
+#       https://unit42.paloaltonetworks.com/npm-supply-chain-attack/
+
+# -----------------------------------------------------------------------------
+# Shai-Hulud — bundle.js droppers (Sept 2025 CrowdStrike-disclosed wave)
+# -----------------------------------------------------------------------------
+# Source: Socket "Updated and Ongoing Supply Chain Attack Targets CrowdStrike
+# NPM Packages" advisory. Each hash is the SHA-256 of one of the seven known
+# minified bundle.js payloads injected via postinstall scripts.
+de0e25a3e6c1e1e5998b306b7141b3dc4c0088da9d7bb47c1c00c91e6e4f85d6  # bundle.js V1
+81d2a004a1bca6ef87a1caf7d0e0b355ad1764238e40ff6d1b1cb77ad4f595c3  # bundle.js V2
+83a650ce44b2a9854802a7fb4c202877815274c129af49e6c2d1d5d5d55c501e  # bundle.js V3
+4b2399646573bb737c4969563303d8ee2e9ddbd1b271f1ca9e35ea78062538db  # bundle.js V4
+dc67467a39b70d1cd4c1f7f7a459b35058163592f4a9e8fb4dffcbba98ef210c  # bundle.js V5
+46faab8ab153fae6e80e7cca38eab363075bb524edd79e42269217a083628f09  # bundle.js V6 (CISA / Unit 42 / StepSecurity corroborated)
+b74caeaa75e077c99f7d44f46daaf9796a3be43ecf24f2a1fd381844669da777  # bundle.js V7
+
+# -----------------------------------------------------------------------------
+# Shai-Hulud 2.0 — setup_bun.js + bun_environment.js (Nov 2025 second wave)
+# -----------------------------------------------------------------------------
+# Source: Datadog Security Labs Shai-Hulud 2.0 analysis. The 2.0 wave drops two
+# files via a `preinstall` script instead of postinstall: a small loader
+# (setup_bun.js) plus an obfuscated payload (bun_environment.js, ~10MB).
+a3894003ad1d293ba96d77881ccd2071446dc3f65f434669b49b3da92421901a  # setup_bun.js
+62ee164b9b306250c1172583f138c9614139264f889fa99614903c12755468d0  # bun_environment.js
+cbb9bc5a8496243e02f3cc080efbe3e4a1430ba0671f2e43a202bf45b05479cd  # bun_environment.js
+f099c5d9ec417d4445a0328ac0ada9cde79fc37410914103ae9c609cbc0ee068  # bun_environment.js
+f1df4896244500671eb4aa63ebb48ea11cee196fafaa0e9874e17b24ac053c02  # bun_environment.js (OSINT-corroborated)
+9d59fd0bcc14b671079824c704575f201b74276238dc07a9c12a93a84195648a  # bun_environment.js (OSINT-corroborated)
+e0250076c1d2ac38777ea8f542431daf61fcbaab0ca9c196614b28065ef5b918  # bun_environment.js (OSINT-corroborated)
