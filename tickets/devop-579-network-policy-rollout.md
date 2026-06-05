@@ -91,16 +91,45 @@ window open until the root cause is fixed (or the policy is amended)
 and restart the 48-hour clock for that stage.
 
 **Rollback procedure** (must be documented before Day 1):
-- Egress emergency: `kubectl delete networkpolicy default-deny-egress -n <ns>` — restores all egress instantly. The per-namespace `egress-allowlist` and the `egress-baseline-allow` policies are additive-only and safe to leave in place.
-- Ingress emergency (once Phase 3 has rolled the ingress cohort): `kubectl delete networkpolicy default-deny-ingress -n <ns>` — restores all ingress instantly.
-- Both names match the pinned naming convention in Phase 2. If you find a workload whose `default-deny-egress` policy has a different name, treat it as a policy-drift incident and fix the name before relying on the rollback command.
-- Have both commands ready as runbook steps in the on-call channel.
+
+Before listing the commands, the on-call must understand the Kubernetes NetworkPolicy isolation rule that governs which rollback actually works: as soon as **any** NetworkPolicy with `policyTypes` including a given direction (Egress or Ingress) selects a pod, that pod becomes isolated for that direction, and the **union** of explicit allow rules across **all** selecting policies forms the entire allow set. Deleting only the `default-deny-egress` policy therefore does **not** fully restore egress for a pod that is also selected by `egress-allowlist` or `egress-baseline-allow` — the pod stays isolated and remains constrained to whatever those remaining policies happen to allow.
+
+There are two emergency-rollback shapes; pick the one that matches the failure mode.
+
+- **Workload missing a legitimate allow rule (most common — the allowlist authoring missed something):** apply an explicit allow-all override scoped to the affected namespace. This is additive, leaves the deny / allowlist / baseline policies in place for audit, and works regardless of how many other egress policies select the pod:
+  ```bash
+  kubectl apply -n <ns> -f - <<'EOF'
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: emergency-allow-all-egress
+  spec:
+    podSelector: {}
+    policyTypes: [Egress]
+    egress:
+    - {}
+  EOF
+  ```
+  Roll the override back with `kubectl delete networkpolicy emergency-allow-all-egress -n <ns>` once the underlying allowlist is fixed.
+- **Policy framework itself is broken (Calico/Cilium misbehaving, garbage allowlist deployed cluster-wide, etc.):** remove *every* egress policy in the namespace, not just the deny, so no policy selects the pod and isolation drops:
+  ```bash
+  kubectl get networkpolicy -n <ns> -o name \
+    | xargs -r -n1 -I{} sh -c 'kubectl get -n <ns> {} -o jsonpath="{.spec.policyTypes}" | grep -q Egress && kubectl delete -n <ns> {}'
+  ```
+  Use this only when the additive allow-all override above isn't restoring egress — it deletes the audit-relevant allowlists too and should be followed by a re-apply from Git source-of-truth once the incident is closed.
+
+Do **not** rely on `kubectl delete networkpolicy default-deny-egress -n <ns>` alone as the primary emergency action: per the isolation rule above, it does not restore egress for any pod that an `egress-allowlist` or `egress-baseline-allow` policy also selects, which is by design in this rollout's per-namespace layout.
+
+The same logic applies to ingress (once Phase 3 has rolled the ingress cohort). Use the analogous `emergency-allow-all-ingress` policy (`policyTypes: [Ingress]`, `ingress: [{}]`) as the primary rollback; fall back to deleting every ingress policy in the namespace only when the additive override isn't sufficient. Deleting `default-deny-ingress` alone has the same partial-restore caveat as the egress case.
+
+- Both deny-policy names match the pinned naming convention in Phase 2. If you find a workload whose `default-deny-egress` or `default-deny-ingress` policy has a different name, treat it as a policy-drift incident and fix the name before relying on any rollback procedure that targets the deny policy by name.
+- Have all four runbook fragments (allow-all-egress override, delete-all-egress fallback, allow-all-ingress override, delete-all-ingress fallback) ready as copy-paste snippets in the on-call channel, with the isolation-rule note above so the on-call understands which to reach for first.
 
 ## Phase 4 — Steady state
 
 - [ ] Add Kyverno policies (after DEVOP-588 lands) that fail any new non-system namespace which is missing either a `default-deny-egress` or a `default-deny-ingress` NetworkPolicy. Match by `metadata.name` exactly — these are the names pinned in the Phase 2 convention table.
 - [ ] Monthly review of `discovery/<namespace>.md` for changes in legitimate egress (new vendor SaaS, etc.).
-- [ ] **Document the rollout and steady-state policies in `SECURITY-RUNBOOK.md`** (DEVOP-571): add a NetworkPolicy section covering (a) the default-deny model, (b) where the per-namespace allowlists live in this repo, (c) the rollback commands (`kubectl delete networkpolicy default-deny-egress -n <ns>` and `kubectl delete networkpolicy default-deny-ingress -n <ns>` — both required, named per the Phase 2 convention), and (d) the on-call escalation path when a workload reports egress or ingress failures. Without this hook into the runbook, on-call has no reference for diagnosing "my pod can't reach X" pages once default-deny is org-wide.
+- [ ] **Document the rollout and steady-state policies in `SECURITY-RUNBOOK.md`** (DEVOP-571): add a NetworkPolicy section covering (a) the default-deny model and the Kubernetes per-pod isolation rule that governs which rollback actually works (any policy with `policyTypes` including a given direction isolates the pod for that direction, and the union of allow rules across all selecting policies forms the entire allow set), (b) where the per-namespace allowlists live in this repo, (c) the rollback procedures from Phase 3 verbatim — the additive `emergency-allow-all-egress` / `emergency-allow-all-ingress` override as the primary action and the delete-all-egress / delete-all-ingress fallback for framework-level failures, with explicit warning that `kubectl delete networkpolicy default-deny-egress` (or `-ingress`) alone does NOT fully restore traffic for pods also selected by `egress-allowlist` / `ingress-allowlist` / `egress-baseline-allow`, and (d) the on-call escalation path when a workload reports egress or ingress failures. Without this hook into the runbook, on-call has no reference for diagnosing "my pod can't reach X" pages once default-deny is org-wide.
 
 ## Dependencies
 
