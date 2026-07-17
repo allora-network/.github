@@ -70,7 +70,8 @@ exercise clock starts when the first participant types `ack`.
 
 **Authority chain for this scenario.** The runbook's destructive-action
 gate — full-package deletion (which in npm means `npm unpublish` of a
-package without a version), runbook §5 step 1 — requires **publisher
+package without a version), the gated deletion branch of runbook §5
+Scenario C step 1 — requires **publisher
 and on-call agree, in writing, in `#security-alerts`**, not founder
 approval. The founder observer is therefore not in the authority
 chain for any phase of this exercise. Phase 2 and §8 reference this
@@ -130,7 +131,7 @@ T+0 without anyone opening a file outside the runbook.
 
 ### Phase 2 — Stop the bleed (target: T+10 min)
 
-Runbook §5 step 1.
+Runbook §5 Scenario C step 1.
 
 - [ ] Lead instructs executor to deprecate the published versions on
   npm. Executor types the exact `npm deprecate` invocation; lead
