@@ -139,7 +139,12 @@ finding(){
 }
 
 sort "$PACKAGES_FILE" -o "$OUTPUT_DIR/packages.sorted"
-sort "$HASHES_FILE"   -o "$OUTPUT_DIR/hashes.sorted"
+  # Normalize to bare 64-hex lines before matching: the seed file allows
+  # `  # comment` suffixes (see ioc-hashes.txt header), and the JS scan's
+  # `grep -qFx` whole-line match can never succeed against a raw sort of
+  # the seed file — every line would be `<hash>  # comment`, silently
+  # disabling the entire ioc_bundle_hash layer (false-clean).
+  awk '!/^[[:space:]]*(#|$)/ {print $1}' "$HASHES_FILE" | sort > "$OUTPUT_DIR/hashes.sorted"
 
 # Build per-ecosystem needle lists once. The previous single-substring grep
 # missed most lockfile formats (pip/poetry/Pipfile/go.sum/modern
