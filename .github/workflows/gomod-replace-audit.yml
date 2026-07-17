@@ -159,18 +159,26 @@ jobs:
           # `gh search code` returns repo + file path tuples. Some repos
           # have multiple go.mod files (monorepo sub-modules); the dedup
           # happens on the `repo<TAB>path` pair, not on `repo` alone.
-          gh search code --owner "$ORG" 'filename:go.mod' --limit 200 \
+          # The code-search API hard-caps at 1000 results; we gate the
+          # overflow check on the RAW (pre-dedup) hit count so `sort -u`
+          # cannot mask API-level truncation that would produce a
+          # false-clean audit report.
+          gh search code --owner "$ORG" 'filename:go.mod' --limit 1000 \
             --json repository,path \
             --jq '.[] | "\(.repository.nameWithOwner)\t\(.path)"' \
-            | sort -u > "$OUTPUT_DIR/paths.tsv"
+            > "$OUTPUT_DIR/paths-raw.tsv"
+          sort -u "$OUTPUT_DIR/paths-raw.tsv" > "$OUTPUT_DIR/paths.tsv"
+          raw_count="$(wc -l < "$OUTPUT_DIR/paths-raw.tsv" | tr -d ' ')"
           count="$(wc -l < "$OUTPUT_DIR/paths.tsv" | tr -d ' ')"
-          echo "Discovered $count <repo,path> tuples."
-          # Loud warning when the search result equals the documented
-          # cap — a Shai-Hulud-vector go.mod sitting in position 201+
-          # would otherwise be silently dropped. Pagination via the
-          # raw search API is the next step when this fires.
-          if [ "$count" -ge 200 ]; then
-            echo "::warning::gh search code returned $count tuples (cap=200). Some go.mod files may not be audited; switch to paginated search-API calls before the org grows further."
+          echo "Discovered $count unique <repo,path> tuples ($raw_count raw hits)."
+          # Hard-fail when the raw (pre-dedup) search-result count has
+          # reached the 1000-result API ceiling.  Gate on raw_count:
+          # `sort -u` can shrink the unique count below the cap while the
+          # API already truncated its result set, which would leave
+          # unaudited go.mod files at positions 1001+.
+          if [ "$raw_count" -ge 1000 ]; then
+            echo "::error::gh search code returned $raw_count raw hits (API cap=1000). The org may contain unaudited go.mod files (false-clean risk). Switch enumeration to paginated REST search-API calls before the org grows further."
+            exit 1
           fi
           {
             echo "paths_file=$OUTPUT_DIR/paths.tsv"
