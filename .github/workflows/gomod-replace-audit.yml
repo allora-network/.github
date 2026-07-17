@@ -452,15 +452,20 @@ jobs:
         # unset (early exit) so an org without it doesn't get a red
         # weekly workflow.
         #
-        # Gated on `success()` (NOT `always()`) and on the audit step
-        # having actually produced its outputs. Without this guard, an
-        # audit-step failure with empty `steps.audit.outputs.suspicious`
-        # would evaluate `'' != '0'` as true and fire a malformed Slack
-        # page with no count and a `summary unavailable` body, while the
-        # rolling-issue step (which gates on implicit success) silently
-        # skipped — leaving on-call with a paged alert and no GitHub
-        # trail. Per PR #9 ce-correctness-reviewer finding.
-        if: success() && steps.audit.outputs.suspicious != '0' && steps.audit.outputs.suspicious != ''
+        # Gated on `always()` && `!cancelled()` &&
+        # `steps.audit.outcome == 'success'` instead of bare `success()`
+        # because `success()` couples the incident page to EVERY prior
+        # step — a transient rolling-issue or artifact-upload failure
+        # after a SUSPICIOUS audit would silently skip the page, killing
+        # both alert channels.  `always()` overrides the implicit
+        # success() AND so downstream step statuses cannot gate an IOC-
+        # grade page.  `steps.audit.outcome == 'success'` preserves the
+        # original no-malformed-page guard when the audit step fails or
+        # is skipped, and `!cancelled()` suppresses pages on manual
+        # cancellation.  The rolling-issue step still gates on implicit
+        # success.  Gating tightened in review-fix-loop iteration 2
+        # (P1 reliability).
+        if: always() && !cancelled() && steps.audit.outcome == 'success' && steps.audit.outputs.suspicious != '0' && steps.audit.outputs.suspicious != ''
         shell: bash
         env:
           SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
