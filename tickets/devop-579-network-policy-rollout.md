@@ -83,7 +83,7 @@ whose egress only fires on cron/batch schedules.
 - [ ] Days 1–2: apply policies to **1 staging namespace** in **1 staging cluster**. Soak 48h.
 - [ ] Days 3–4: apply to all staging namespaces in 1 cluster. Soak 48h.
 - [ ] Days 5–6: apply to 1 production namespace (lowest-risk: docs site). Soak 48h.
-- [ ] Days 7+: roll forward through remaining production namespaces in priority-inverse order (lowest-blast-radius first), keeping a 48h soak between each cluster cohort.
+- [ ] Days 7+: roll forward through remaining production namespaces in priority-inverse order (lowest-blast-radius first), keeping a 48h soak between each cohort — one cohort is one namespace.
 
 A stage may only advance if the prior soak completed with zero
 NetworkPolicy-attributable incidents. If anything broke, hold the
