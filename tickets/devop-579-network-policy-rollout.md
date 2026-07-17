@@ -162,5 +162,6 @@ same time.
 ## Links
 
 - Linear: https://linear.app/alloralabs/issue/DEVOP-579
+- Related tickets: DEVOP-571 (https://linear.app/alloralabs/issue/DEVOP-571), DEVOP-588 (https://linear.app/alloralabs/issue/DEVOP-588), DEVOP-589 (https://linear.app/alloralabs/issue/DEVOP-589)
 - Cilium NetworkPolicy reference: https://docs.cilium.io/en/stable/security/policy/
 - Calico NetworkPolicy reference: https://docs.tigera.io/calico/latest/network-policy/
