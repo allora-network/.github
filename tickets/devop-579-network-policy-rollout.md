@@ -8,7 +8,7 @@ Add `default-deny-egress` NetworkPolicies to every Kubernetes namespace across o
 
 ## Why this is hard (the 3-engineer-week estimate)
 
-NetworkPolicies are stateless and additive — meaning a `default-deny` policy will silently break every workload that has a legitimate outbound dependency that isn't yet enumerated. Production-impacting blast radius if rushed. The bulk of the work is **discovery**, not deployment.
+NetworkPolicies are stateful (return traffic for an allowed connection is implicitly permitted via connection tracking) and additive — meaning a `default-deny` policy will silently break every workload that has a legitimate outbound dependency that isn't yet enumerated. Production-impacting blast radius if rushed. The bulk of the work is **discovery**, not deployment.
 
 ## Phase 0 — Pre-flight (week 1, days 1–2)
 
