@@ -570,7 +570,9 @@ jobs:
         # motivated this gate.
         # No-ops cleanly if SLACK_SECURITY_WEBHOOK is unset (early exit, not
         # a failure) so an org without the secret provisioned doesn't get a
-        # red daily workflow.
+        # red daily workflow. The step emits a `delivered` output (`false` on
+        # this no-op path, `true` only after HTTP 200) so the paged-at marker
+        # step can distinguish an actual delivery from the intentional no-op.
         if: always() && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
         shell: bash
         env:
@@ -580,6 +582,11 @@ jobs:
           set -euo pipefail
           if [ -z "${SLACK_SECURITY_WEBHOOK:-}" ]; then
             echo "::warning::SLACK_SECURITY_WEBHOOK secret is not set; skipping Slack page."
+            # Record the no-op explicitly so the Persist Slack-paged marker step
+            # does NOT write a paged-at marker for a page that never went out —
+            # the dedup chain then treats this run as paged-at-missing and the
+            # next IOC-grade run pages conservatively once the webhook exists.
+            echo "delivered=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -703,6 +710,7 @@ jobs:
             exit 1
           fi
           echo "Slack page delivered (HTTP $http_code, attempts=$attempt)."
+          echo "delivered=true" >> "$GITHUB_OUTPUT"
 
       - name: Persist Slack-paged marker
         # Append a one-line bot comment recording the moment Slack
@@ -730,7 +738,12 @@ jobs:
         # cannot suppress the paged-at marker after Slack actually
         # delivered — while a failed Slack delivery still records no
         # marker, preserving the dedup chain's honesty.
-        if: always() && steps.slack-page.outcome == 'success' && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
+        # The `delivered == 'true'` condition additionally distinguishes an
+        # actual HTTP-200 delivery from the Slack step's unset-webhook no-op
+        # (which exits 0 = outcome success): without it, a run with no
+        # webhook provisioned would record a paged-at marker and suppress
+        # real pages for up to a week after the webhook is later provisioned.
+        if: always() && steps.slack-page.outcome == 'success' && steps.slack-page.outputs.delivered == 'true' && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
         shell: bash
         env:
           FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
