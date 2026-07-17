@@ -8,7 +8,7 @@ Detect attacker-fork redirects in any allora-network Go module's
 
 ## Deliverables
 1. `.github/workflows/gomod-replace-audit.yml` — weekly + manual-dispatch
-   org sweep. Enumerates every `go.mod` via `gh search code`, fetches each
+   org sweep. Enumerates every `go.mod` via per-repo sharded `gh api search/code`, fetches each
    from its default branch, runs the awk extractor from
    `shai-hulud-defense/REFERENCE.md` (covers single-line + `replace (...)`
    blocks), and filters against the trusted-host allowlist. Non-allowlisted

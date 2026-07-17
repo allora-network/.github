@@ -156,30 +156,85 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT_DIR"
-          # `gh search code` returns repo + file path tuples. Some repos
-          # have multiple go.mod files (monorepo sub-modules); the dedup
-          # happens on the `repo<TAB>path` pair, not on `repo` alone.
-          # The code-search API hard-caps at 1000 results; we gate the
-          # overflow check on the RAW (pre-dedup) hit count so `sort -u`
-          # cannot mask API-level truncation that would produce a
-          # false-clean audit report.
-          gh search code --owner "$ORG" 'filename:go.mod' --limit 1000 \
-            --json repository,path \
-            --jq '.[] | "\(.repository.nameWithOwner)\t\(.path)"' \
-            > "$OUTPUT_DIR/paths-raw.tsv"
+          # Sharded per-repo enumeration replaces the previous org-wide
+          # `gh search code` call for three reasons:
+          #   (a) code-search API hard-caps at 1000 results; REST
+          #       pagination cannot pass that ceiling.
+          #   (b) `incomplete_results` (server-side timeout) is invisible
+          #       to `gh search code --json` — a timed-out partial result
+          #       set is indistinguishable from complete (false-clean).
+          #   (c) sharding keeps every query far under the cap and exposes
+          #       `incomplete_results` per shard via `gh api` (fail-
+          #       closed).
+          # The org repos endpoint is fully paginated with no result
+          # ceiling. Forks are excluded for parity with code-search
+          # defaults (`fork:true` not requested). Archived repos stay
+          # (code search indexes them).
+          echo "::group::Enumerate org repos"
+          gh api "orgs/$ORG/repos?per_page=100" --paginate \
+            --jq '.[] | select(.fork | not) | .full_name' \
+            > "$OUTPUT_DIR/repos.txt"
+          repo_count="$(wc -l < "$OUTPUT_DIR/repos.txt" | tr -d ' ')"
+          echo "Resolved $repo_count non-fork repos."
+          echo "::endgroup::"
+          : > "$OUTPUT_DIR/paths-raw.tsv"
+          # Code search is rate-limited at 30 req/min authenticated.
+          # 2.5s paces under the cap with margin over the 2s floor.
+          shard=0
+          while IFS= read -r repo || [ -n "$repo" ]; do
+            [ -z "$repo" ] && continue
+            shard=$((shard + 1))
+            # Bounded retry (3 attempts, fixed backoff 5s/15s/45s):
+            # `gh api` does not surface Retry-After cleanly to shell; a
+            # persistent failure aborts loudly rather than false-cleaning.
+            ok=0
+            attempt=0
+            max_attempts=3
+            delays=(5 15 45)
+            while [ "$attempt" -lt "$max_attempts" ]; do
+              attempt=$((attempt + 1))
+              if gh api "search/code?q=repo:${repo}+filename:go.mod&per_page=100" \
+                   > "$OUTPUT_DIR/shard.json" 2>"$OUTPUT_DIR/shard.err"; then
+                ok=1
+                break
+              fi
+              # No sleep after the final attempt — fall through to the
+              # loud abort below instead of idling 45s on a dead shard.
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                break
+              fi
+              sleep_for="${delays[$((attempt - 1))]}"
+              echo "::warning::Search shard $repo attempt $attempt/$max_attempts failed; retrying in ${sleep_for}s."
+              sleep "$sleep_for"
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "::error::Search shard $repo failed after $max_attempts attempts: $(head -c 300 "$OUTPUT_DIR/shard.err" 2>/dev/null || true)"
+              exit 1
+            fi
+            # Fail closed on server-side timeout (incomplete_results=true).
+            if [ "$(jq -r '.incomplete_results' "$OUTPUT_DIR/shard.json")" = "true" ]; then
+              echo "::error::Search shard $repo: code-search server-side timeout (incomplete_results=true). Re-run; persistent timeouts need a narrower shard."
+              exit 1
+            fi
+            # Fail closed on single-page overflow (per_page=100 is the
+            # API max). Realistically never fires (monorepo with 100+
+            # go.mod files); tripwire guard.
+            if [ "$(jq -r '.total_count // 0' "$OUTPUT_DIR/shard.json")" -gt 100 ]; then
+              echo "::error::Search shard $repo: total_count > 100 (one-page overflow). Switch this shard to paginated fetch."
+              exit 1
+            fi
+            jq -r --arg repo "$repo" \
+              '.items[] | "\($repo)\t\(.path)"' \
+              "$OUTPUT_DIR/shard.json" >> "$OUTPUT_DIR/paths-raw.tsv"
+            rm -f "$OUTPUT_DIR/shard.json" "$OUTPUT_DIR/shard.err"
+            sleep 2.5
+          done < "$OUTPUT_DIR/repos.txt"
+          # Some repos have multiple go.mod files (monorepo sub-modules);
+          # dedup on the `repo<TAB>path` pair, not on `repo` alone.
           sort -u "$OUTPUT_DIR/paths-raw.tsv" > "$OUTPUT_DIR/paths.tsv"
           raw_count="$(wc -l < "$OUTPUT_DIR/paths-raw.tsv" | tr -d ' ')"
           count="$(wc -l < "$OUTPUT_DIR/paths.tsv" | tr -d ' ')"
-          echo "Discovered $count unique <repo,path> tuples ($raw_count raw hits)."
-          # Hard-fail when the raw (pre-dedup) search-result count has
-          # reached the 1000-result API ceiling.  Gate on raw_count:
-          # `sort -u` can shrink the unique count below the cap while the
-          # API already truncated its result set, which would leave
-          # unaudited go.mod files at positions 1001+.
-          if [ "$raw_count" -ge 1000 ]; then
-            echo "::error::gh search code returned $raw_count raw hits (API cap=1000). The org may contain unaudited go.mod files (false-clean risk). Switch enumeration to paginated REST search-API calls before the org grows further."
-            exit 1
-          fi
+          echo "Discovered $count unique <repo,path> tuples ($raw_count raw hits across $repo_count shards)."
           {
             echo "paths_file=$OUTPUT_DIR/paths.tsv"
             echo "output_dir=$OUTPUT_DIR"
