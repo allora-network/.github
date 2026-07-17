@@ -60,7 +60,7 @@ Every NetworkPolicy this rollout creates uses one of these exact `metadata.name`
 | Egress | `default-deny-egress.yaml` | `default-deny-egress` | Deny all egress except the baseline allows in `egress-baseline-allow.yaml`. |
 | Egress | `egress-baseline-allow.yaml` | `egress-baseline-allow` | Cluster-wide always-on allows: DNS to kube-dns / CoreDNS (53/udp, 53/tcp) and NTP (123/udp). Lives in every namespace so clock sync and name resolution survive the default-deny. |
 | Egress | `egress-allowlist.yaml` | `egress-allowlist` | Per-namespace workload-specific egress allows derived from Phase 1. |
-| Ingress | `default-deny-ingress.yaml` | `default-deny-ingress` | Deny all ingress except the baseline allows below. |
+| Ingress | `default-deny-ingress.yaml` | `default-deny-ingress` | Deny all ingress except the per-namespace allows in `ingress-allowlist.yaml`. |
 | Ingress | `ingress-allowlist.yaml` | `ingress-allowlist` | Per-namespace ingress allows (ingress controller, same-namespace pods, explicit upstreams). |
 
 Per namespace, write the two egress files (`default-deny-egress.yaml` plus `egress-allowlist.yaml`) under `network-policies/<cluster>/<namespace>/`. The baseline-allow policy is generated from a single template applied to every namespace; do not hand-author it per-namespace.
