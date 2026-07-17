@@ -24,7 +24,7 @@ DEVOP-571; this link resolves once both PRs merge.)
 - [ ] Have the runbook open in a second tab — participants will reference
   it live, so you should be watching which sections they navigate to and
   how fast they find what they need.
-- [ ] Reserve `+1` slot for the founder on-call to silently observe.
+- [ ] Reserve `+1` slot for the founder observer to silently observe.
 
 ---
 
