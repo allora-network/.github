@@ -10,7 +10,8 @@ facilitator.
 **Duration:** 90 minutes (60 min exercise + 30 min debrief).
 **Stakes:** zero production impact — pure simulation in a Slack channel.
 **Reference:** [`SECURITY-RUNBOOK.md`](../SECURITY-RUNBOOK.md) is the
-script every participant runs against.
+script every participant runs against. (The runbook lands via
+DEVOP-571; this link resolves once both PRs merge.)
 
 ---
 
