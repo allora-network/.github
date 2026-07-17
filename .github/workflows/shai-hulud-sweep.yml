@@ -260,10 +260,13 @@ jobs:
           # script. Extract it at runtime — a second inline copy here previously
           # had to be kept in sync by hand, and silent drift would either
           # mis-dedup (skip a real new IOC) or mis-page (re-page on
-          # operational-only changes). Fail open (page) on extraction failure,
-          # mirroring the stamp-unknown guard below.
+          # operational-only changes). The guard validates the extracted value
+          # is a non-empty, working jq regex (jq is the downstream consumer);
+          # fail open (page) on any extraction/validation failure, mirroring
+          # the stamp-unknown guard below.
           IOC_RULES_RE="$(sed -nE "s/^IOC_RULES_RE='(.*)'$/\1/p" scripts/shai-hulud-ioc-sweep.sh | head -1)"
-          if ! printf '%s' "$IOC_RULES_RE" | grep -qE '^\(.*\)$'; then
+          if [ -z "$IOC_RULES_RE" ] \
+             || ! jq -n --arg re "$IOC_RULES_RE" '"probe" | test($re)' >/dev/null 2>&1; then
             echo "::warning::Could not extract IOC_RULES_RE from scripts/shai-hulud-ioc-sweep.sh; defaulting to page Slack (fail-open)."
             {
               echo "current_stamp="
