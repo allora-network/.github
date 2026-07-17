@@ -538,7 +538,10 @@ if gh api orgs/"$ORG"/members --paginate --jq '.[].login' \
     [ -n "$member" ] || continue
     MEMBER_OUT="$OUTPUT_DIR/.member.$member.out"
     MEMBER_ERR="$OUTPUT_DIR/.member.$member.err"
-    if gh api -X GET "search/repositories" -f q="user:$member shai-hulud" \
+    # Same parenthesized OR group as the org-scoped search above —
+    # `shai-hulud` alone misses `shai_hulud` underscore-variant exfil
+    # repos, and unparenthesized OR would unscope the second branch.
+    if gh api -X GET "search/repositories" -f q="user:$member (shai-hulud OR shai_hulud)" \
          --jq '.items[]?.full_name' > "$MEMBER_OUT" 2> "$MEMBER_ERR"; then
       while IFS= read -r hit; do
         [ -n "$hit" ] && finding "$hit" "public_exfil_repo_member" "" "shai-hulud-named repo under org member"
