@@ -237,10 +237,13 @@ jobs:
         # Stamp content: sha256 of sorted `{repo,rule,path,detail}` TSV of
         # IOC-grade rows from findings.json. `ts` is intentionally excluded
         # because it's per-run and would force a fresh stamp every cycle,
-        # defeating dedup entirely. IOC_RULES_RE MUST stay in sync with
-        # scripts/shai-hulud-ioc-sweep.sh (search for IOC_RULES_RE) — a
-        # silent drift would either mis-dedup (skip a real new IOC) or
-        # mis-page (re-page on operational-only changes).
+        # defeating dedup entirely. IOC_RULES_RE extracts from
+        # scripts/shai-hulud-ioc-sweep.sh at runtime (search for
+        # IOC_RULES_RE) — a single source of truth. Fail-open (page
+        # Slack) if extraction fails; a second inline copy here
+        # previously had to be kept in sync by hand, and silent drift
+        # would either mis-dedup (skip a real new IOC) or mis-page
+        # (re-page on operational-only changes).
         if: always() && steps.sweep.outputs.rc == '1'
         id: ioc-dedup
         shell: bash
@@ -253,7 +256,24 @@ jobs:
           WEEKLY_REPAGE_S: '604800'  # 7 * 24 * 3600
         run: |
           set -euo pipefail
-          IOC_RULES_RE='^(ioc_package_match|ioc_bundle_hash|persistence_workflow|suspicious_lifecycle_script|public_exfil_repo|public_exfil_repo_member|go_suspicious_replace|go_replace_path_mismatch|go_unsafe_env|go_unsafe_env_indirect)$'
+          # Single source of truth: IOC_RULES_RE lives in the vendored detector
+          # script. Extract it at runtime — a second inline copy here previously
+          # had to be kept in sync by hand, and silent drift would either
+          # mis-dedup (skip a real new IOC) or mis-page (re-page on
+          # operational-only changes). Fail open (page) on extraction failure,
+          # mirroring the stamp-unknown guard below.
+          IOC_RULES_RE="$(sed -nE "s/^IOC_RULES_RE='(.*)'$/\1/p" scripts/shai-hulud-ioc-sweep.sh | head -1)"
+          if ! printf '%s' "$IOC_RULES_RE" | grep -qE '^\(.*\)$'; then
+            echo "::warning::Could not extract IOC_RULES_RE from scripts/shai-hulud-ioc-sweep.sh; defaulting to page Slack (fail-open)."
+            {
+              echo "current_stamp="
+              echo "prev_stamp="
+              echo "prev_paged_at="
+              echo "should_page=true"
+              echo "decision_reason=ioc-rules-re-extract-failed"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           current_stamp=""
           if [ -s "$FINDINGS_PATH" ]; then

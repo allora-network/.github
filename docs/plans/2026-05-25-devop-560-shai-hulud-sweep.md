@@ -42,10 +42,10 @@ Linear: <https://linear.app/alloralabs/issue/DEVOP-560>
   daily under bare gating and conditions responders to mute the channel.
   Both the dedup gate AND the weekly re-page are required: bare dedup
   without re-page lets a forgotten standing IOC silently age out forever.
-  IOC_RULES_RE in the workflow's dedup step MUST stay in sync with
-  `scripts/shai-hulud-ioc-sweep.sh` (search for `IOC_RULES_RE`) — drift
-  would either mis-dedup a real new IOC or re-page on operational-only
-  changes that didn't bump the stamp.
+  IOC_RULES_RE in the workflow's dedup step extracts from
+  `scripts/shai-hulud-ioc-sweep.sh` at runtime (search for `IOC_RULES_RE`)
+  — a single source of truth. The step fails open (pages Slack) if
+  extraction fails, so drift between the two files is no longer a concern.
 - **Schedule:** `cron: '7 4 * * *'` (04:07 UTC, off-peak + off-minute), plus
   `workflow_dispatch` for manual / debugging runs.
 - **Permissions:** `contents: read` + `issues: write`. No other scopes.
