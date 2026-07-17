@@ -1,3 +1,4 @@
+# schema:v1
 # IOC package list — Shai-Hulud / Socket-tracked compromised npm + PyPI releases.
 #
 # Format: one line per <ecosystem>:<name>@<version>

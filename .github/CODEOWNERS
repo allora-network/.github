@@ -1,0 +1,42 @@
+# CODEOWNERS for allora-network/.github (DEVOP-560)
+#
+# Detector-disable-via-PR is the failure mode this file guards against:
+# a single PR that touches the daily Shai-Hulud IOC sweep workflow, the
+# vendored detector script, the IOC seed lists, or the SHA-256 integrity
+# sidecar can silently turn the daily detection off if no security review
+# is enforced. CODEOWNERS makes review by `@allora-network/security`
+# (and, for the workflow itself, `@allora-network/devops`) the in-repo
+# gate. The complementary branch-protection rule ("Require review from
+# Code Owners") is an org-admin task tracked in
+# docs/plans/2026-05-25-devop-560-shai-hulud-sweep.md.
+#
+# Team-name caveat: teams are pinned to the slugs verified on
+# 2026-05-25 via `gh api orgs/allora-network/teams/{security,devops}`.
+# If either team is renamed or restructured, update this file in lock-
+# step or the rule silently degrades to "no required reviewer" for the
+# affected path.
+#
+# Last entry wins per path. The order below is "broadest fallback first,
+# narrowest security-critical paths last" so the security/devops rules
+# take precedence over any future generic catch-alls added above them.
+
+# Default owner for the rest of the repo — devops carries the
+# `.github` operations surface. (Add `@allora-network/<team>`-style
+# entries above this default if a new path-specific owner appears.)
+*                                       @allora-network/devops
+
+# Shai-Hulud detection surface — require security review on any change
+# to the workflow, the vendored detector script, the SHA-256 integrity
+# sidecar, the IOC seed files, or the security folder generally. Devops
+# is co-owner on the workflow so day-to-day operational tweaks
+# (concurrency, retention, etc.) don't block on security availability.
+/.github/workflows/shai-hulud-sweep.yml     @allora-network/security @allora-network/devops
+/scripts/shai-hulud-ioc-sweep.sh            @allora-network/security
+/scripts/shai-hulud-ioc-sweep.sh.sha256     @allora-network/security
+/.github/security/                          @allora-network/security
+
+# This file itself — require security review to change ownership rules
+# for any of the paths above. Without this entry, a PR could rewrite
+# CODEOWNERS to remove the security reviewer for the workflow in the
+# same PR that disables detection.
+/.github/CODEOWNERS                         @allora-network/security

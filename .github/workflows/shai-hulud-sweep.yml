@@ -1,0 +1,840 @@
+name: Shai-Hulud IOC Sweep
+
+# Daily org-wide sweep for Shai-Hulud indicators of compromise.
+# Reference: DEVOP-560. Canonical detection logic lives in
+# scripts/shai-hulud-ioc-sweep.sh (vendored from
+# allora-network/skills @ skills/shai-hulud-defense/scripts/shai-hulud-ioc-sweep.sh
+# — see the file header for refresh procedure / pinned commit).
+#
+# Outputs:
+#   - clean (script exit 0):  no-op (no issue update, no Slack page).
+#   - operational (exit 2):   append a comment to the rolling issue labelled
+#                             `shai-hulud-sweep`, or open a new one if none.
+#   - IOC-grade (exit 1):     same rolling-issue update + page Slack via the
+#                             `SLACK_SECURITY_WEBHOOK` org secret.
+#
+# Humans drive close-and-reopen of the rolling issue so triage state is
+# preserved across runs; the workflow never auto-closes.
+
+on:
+  schedule:
+    # 04:07 UTC daily — off-peak + off-minute to dodge GitHub Actions cron
+    # contention spikes on whole-hour boundaries.
+    - cron: '7 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize concurrent runs so a manual `workflow_dispatch` while the daily
+# cron is mid-sweep can't race on the rolling issue / Slack page. Never
+# cancel an in-progress sweep — partial scans are more dangerous than
+# delayed ones (they false-clean unscanned repos).
+concurrency:
+  group: shai-hulud-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Sweep allora-network for IOCs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ORG: allora-network
+      ROLLING_LABEL: shai-hulud-sweep
+      # Prefer a dedicated `GH_ORG_READ_TOKEN` secret (fine-grained PAT or
+      # GitHub App token with `read:org` + repo:read) when provisioned —
+      # required for private-repo enumeration and member exfil search. Falls
+      # back to the workflow's default GITHUB_TOKEN, which can only see
+      # public org repos and lacks `read:org`; in that mode the script
+      # emits `check_skipped` operational findings for the members API so
+      # the partial-coverage state is visible in the rolling issue, never
+      # silently false-cleaned. See docs/plans/2026-05-25-devop-560-*.md.
+      GH_TOKEN: ${{ secrets.GH_ORG_READ_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout .github repo (for IOC lists + sweep script)
+        # SHA pin: actions/checkout v4.2.2 (Oct 2024). Matches the pin used
+        # in allora-network/ci-workflows-private hardened reusable workflows.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Verify required tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh --version
+          jq --version
+          sha256sum --version | head -1
+          git --version
+
+      - name: Run Shai-Hulud IOC sweep
+        id: sweep
+        shell: bash
+        # The script exits 0 (clean) / 1 (IOC) / 2 (operational). We deliberately
+        # do NOT let a 1/2 exit fail the step — those are reported via the
+        # rolling-issue + Slack page steps below, not by failing the workflow
+        # (which would obscure the structured output behind a red ❌ and break
+        # the daily-cron observability story). Only true infra errors should
+        # fail this step.
+        run: |
+          set -uo pipefail
+          # Integrity gate: the script is vendored verbatim from upstream
+          # (allora-network/skills). Verify the committed SHA-256 sidecar
+          # matches the on-disk file before invoking it — any PR that
+          # modifies the script body without refreshing the sidecar fails
+          # this step loudly instead of executing a tampered detector.
+          # Refresh: `shasum -a 256 scripts/shai-hulud-ioc-sweep.sh > scripts/shai-hulud-ioc-sweep.sh.sha256`
+          #
+          # Pin the sidecar's path field before invoking `sha256sum --check`.
+          # `sha256sum --check` parses each manifest line as `<hash>  <path>`
+          # and resolves <path> relative to cwd — it does NOT enforce that
+          # <path> equals scripts/shai-hulud-ioc-sweep.sh. Without this
+          # guard, an attacker who can mutate the sidecar (CODEOWNERS gate
+          # requires security review, but defense-in-depth) could repoint
+          # the sidecar at any other in-tree file whose hash they control
+          # (e.g. LICENSE, or the sidecar itself) and pass the gate while
+          # the actual detector script is silently swapped to a no-op.
+          # Lock the gate to the single expected `<sha>  <path>` line.
+          if ! grep -qE '^[0-9a-f]{64}  scripts/shai-hulud-ioc-sweep\.sh$' scripts/shai-hulud-ioc-sweep.sh.sha256; then
+            echo "::error::Sidecar path validation failed for scripts/shai-hulud-ioc-sweep.sh.sha256 — expected exactly one line of the form '<sha256>  scripts/shai-hulud-ioc-sweep.sh'. Refusing to execute (sidecar may have been retargeted at a different file)."
+            exit 1
+          fi
+          if [ "$(wc -l < scripts/shai-hulud-ioc-sweep.sh.sha256 | tr -d ' ')" != "1" ]; then
+            echo "::error::Sidecar scripts/shai-hulud-ioc-sweep.sh.sha256 must contain exactly one manifest line. Refusing to execute."
+            exit 1
+          fi
+          if ! sha256sum --check --status scripts/shai-hulud-ioc-sweep.sh.sha256; then
+            echo "::error::Integrity check failed for scripts/shai-hulud-ioc-sweep.sh — committed SHA-256 sidecar does not match the file on disk. Refusing to execute."
+            exit 1
+          fi
+          chmod +x scripts/shai-hulud-ioc-sweep.sh
+          # Pin OUTPUT_DIR so subsequent steps can find findings.json and
+          # summary.md by a known path. Default of $(date) would change
+          # between steps.
+          OUTPUT_DIR="${GITHUB_WORKSPACE}/.shai-hulud-sweep"
+          export OUTPUT_DIR
+          mkdir -p "$OUTPUT_DIR"
+          echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          set +e
+          ./scripts/shai-hulud-ioc-sweep.sh "$ORG" \
+            .github/security/ioc-packages.txt \
+            .github/security/ioc-hashes.txt
+          rc=$?
+          set -e
+          {
+            echo "rc=$rc"
+            echo "summary_path=${OUTPUT_DIR}/summary.md"
+            echo "findings_path=${OUTPUT_DIR}/findings.json"
+          } >> "$GITHUB_OUTPUT"
+          echo "Sweep exit code: $rc"
+          if [ -s "${OUTPUT_DIR}/summary.md" ]; then
+            echo "::group::Sweep summary"
+            cat "${OUTPUT_DIR}/summary.md"
+            echo "::endgroup::"
+          else
+            echo "::warning::sweep produced no summary.md — the script likely failed before aggregation."
+          fi
+          # Step succeeds for rc in {0,1,2}. Anything else is treated as
+          # infrastructure failure (script crashed, missing tool, etc.) and
+          # surfaces as a red workflow run for human attention.
+          case "$rc" in
+            0|1|2) exit 0 ;;
+            *)     exit "$rc" ;;
+          esac
+
+      - name: Upload sweep artifacts (findings only)
+        if: always() && steps.sweep.outputs.output_dir != ''
+        # SHA pin: actions/upload-artifact v4.4.3 (Oct 2024).
+        #
+        # Artifact scope is intentionally narrow: only the structured
+        # findings + summary + repo list. Anyone with `actions: read` on
+        # this repo can download workflow artifacts, but the org includes
+        # private repositories, and uploading raw clones (`clones/`) or
+        # preserved evidence trees (`evidence/`) would expose private-repo
+        # source code to anyone who can read this workflow's runs.
+        # Privileged incident responders can re-clone any flagged repo on
+        # demand from the findings — the runner just needs to surface
+        # which repos matched, not their full contents.
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: shai-hulud-sweep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.sweep.outputs.output_dir }}/findings.json
+            ${{ steps.sweep.outputs.output_dir }}/summary.md
+            ${{ steps.sweep.outputs.output_dir }}/repos.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Find rolling issue
+        # Resolve the rolling-issue number ONCE per run and reuse it across
+        # the ioc-dedup, rolling-issue-update, and Slack-paged-marker steps.
+        # Removes the duplicated `gh issue list` query that previously lived
+        # in both ioc-dedup and the update step (drift hazard: a future
+        # tweak to one query without the other would mis-locate the rolling
+        # issue on one surface) and closes a TOCTOU window where a human
+        # could close the rolling issue between the two queries, sending
+        # the second consumer to a stale/empty issue_num.
+        #
+        # Gated on `rc == '1' || rc == '2'` so this step matches the union
+        # of consumers below: ioc-dedup (rc=1), the update step (rc=1|2),
+        # and the new paged-at marker step (rc=1 + Slack-paged). Clean
+        # runs (rc=0) skip — there's nothing to attach.
+        #
+        # Empty `issue_num` is a valid state (first ever non-clean run,
+        # rolling issue not yet created); the update step's gh-issue-create
+        # path below handles that case.
+        if: always() && (steps.sweep.outputs.rc == '1' || steps.sweep.outputs.rc == '2')
+        id: find-rolling-issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `gh issue list --search "... sort:created-asc"` mirrors the
+          # update step's lookup (oldest open issue with the rolling label
+          # wins, so a long-running incident issue stays canonical even if
+          # someone files a duplicate). `--limit 1` + `.[0].number // empty`
+          # gives an empty string when no rolling issue exists yet.
+          issue_num="$(gh issue list \
+            --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
+            --limit 1 \
+            --json number \
+            --jq '.[0].number // empty' 2>/dev/null || true)"
+          echo "issue_num=${issue_num}" >> "$GITHUB_OUTPUT"
+          if [ -n "$issue_num" ]; then
+            echo "::notice::Resolved rolling issue #${issue_num} for label=${ROLLING_LABEL}."
+          else
+            echo "::notice::No open rolling issue found for label=${ROLLING_LABEL}; update step will create one."
+          fi
+
+      - name: Compute IOC stamp and Slack dedup decision
+        # Decide whether the IOC-grade Slack page fires for this run. Without
+        # this gate the bare `rc == '1'` Slack step pages on EVERY IOC-grade
+        # run, so a standing unresolved IOC pages the channel daily and
+        # conditions responders to mute it — textbook alert fatigue. See
+        # PRRT_kwDOLZ5Xss6Ee5gN (cubic, DEVOP-560) and the original
+        # ce-code-review P1 finding (anchor 100) corroborating across four
+        # reviewers.
+        #
+        # Decision policy:
+        #   - first IOC-grade run after clean (no prior stamp)       → page
+        #   - today's IOC set differs from the previous stamp        → page
+        #   - same IOC set as previous, but >= WEEKLY_REPAGE_S old   → page
+        #     (so a forgotten standing IOC doesn't silently age out)
+        #   - otherwise                                              → skip
+        #
+        # State persistence: hidden HTML markers embedded in IOC-grade
+        # rolling-issue comments by the next step below
+        # (<!-- shai-hulud-ioc-stamp: ... --> and
+        # <!-- shai-hulud-paged-at: ... -->). Comments are durable across
+        # runs and survive issue close/reopen as long as the same issue is
+        # reused; when humans rotate to a fresh rolling issue, the missing
+        # prior stamp correctly forces a page on the next IOC-grade run.
+        #
+        # Stamp content: sha256 of sorted `{repo,rule,path,detail}` TSV of
+        # IOC-grade rows from findings.json. `ts` is intentionally excluded
+        # because it's per-run and would force a fresh stamp every cycle,
+        # defeating dedup entirely. IOC_RULES_RE extracts from
+        # scripts/shai-hulud-ioc-sweep.sh at runtime (search for
+        # IOC_RULES_RE) — a single source of truth. Fail-open (page
+        # Slack) if extraction fails; a second inline copy here
+        # previously had to be kept in sync by hand, and silent drift
+        # would either mis-dedup (skip a real new IOC) or mis-page
+        # (re-page on operational-only changes).
+        if: always() && steps.sweep.outputs.rc == '1'
+        id: ioc-dedup
+        shell: bash
+        env:
+          FINDINGS_PATH: ${{ steps.sweep.outputs.findings_path }}
+          FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
+          # `issues:read` only — the same scope used by the rolling-issue
+          # update step below. Keep narrow.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEEKLY_REPAGE_S: '604800'  # 7 * 24 * 3600
+        run: |
+          set -euo pipefail
+          # Single source of truth: IOC_RULES_RE lives in the vendored detector
+          # script. Extract it at runtime — a second inline copy here previously
+          # had to be kept in sync by hand, and silent drift would either
+          # mis-dedup (skip a real new IOC) or mis-page (re-page on
+          # operational-only changes). The guard validates the extracted value
+          # is a non-empty, working jq regex (jq is the downstream consumer);
+          # fail open (page) on any extraction/validation failure, mirroring
+          # the stamp-unknown guard below.
+          IOC_RULES_RE="$(sed -nE "s/^IOC_RULES_RE='(.*)'$/\1/p" scripts/shai-hulud-ioc-sweep.sh | head -1)"
+          if [ -z "$IOC_RULES_RE" ] \
+             || ! jq -n --arg re "$IOC_RULES_RE" '"probe" | test($re)' >/dev/null 2>&1; then
+            echo "::warning::Could not extract IOC_RULES_RE from scripts/shai-hulud-ioc-sweep.sh; defaulting to page Slack (fail-open)."
+            {
+              echo "current_stamp="
+              echo "prev_stamp="
+              echo "prev_paged_at="
+              echo "should_page=true"
+              echo "decision_reason=ioc-rules-re-extract-failed"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          current_stamp=""
+          if [ -s "$FINDINGS_PATH" ]; then
+            # `|| true` keeps `set -euo pipefail` from aborting the step when
+            # the jq pipeline fails (malformed findings.json, mid-run file
+            # mutation, jq filter error). The empty/garbage `current_stamp`
+            # then routes through the documented fail-open guard below
+            # (`if [ -z "$current_stamp" ] || ! grep -qE '^[0-9a-f]{64}$'`)
+            # which warns and pages Slack instead of silently fail-CLOSED.
+            # Mirrors the `|| true` already present on the four sibling
+            # pipelines in this same step (gh issue list, gh api comments
+            # fetch, prev_stamp scan, prev_paged_at scan).
+            current_stamp="$(jq -r --arg re "$IOC_RULES_RE" '
+                [.[]
+                  | select(.rule | test($re))
+                  | "\(.repo)\t\(.rule)\t\(.path)\t\(.detail)"]
+                | sort
+                | .[]
+              ' "$FINDINGS_PATH" 2>/dev/null \
+              | sha256sum | awk '{print $1}' || true)"
+          fi
+          if [ -z "$current_stamp" ] \
+             || ! printf '%s' "$current_stamp" | grep -qE '^[0-9a-f]{64}$'; then
+            # rc=1 implies IOC_COUNT > 0 in the script, so an empty/invalid
+            # stamp here indicates a precondition failure (missing
+            # findings.json, pre-aggregation crash). Fail OPEN — page Slack
+            # so an unknown-state run surfaces visibly rather than silently
+            # dedup-skipping.
+            echo "::warning::Cannot compute IOC stamp from $FINDINGS_PATH; defaulting to page Slack (fail-open)."
+            {
+              echo "current_stamp="
+              echo "prev_stamp="
+              echo "prev_paged_at="
+              echo "should_page=true"
+              echo "decision_reason=stamp-unknown"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Rolling issue number resolved by the upstream find-rolling-issue
+          # step (single canonical lookup; eliminates the prior drift hazard
+          # of two independent `gh issue list` queries). Empty when no
+          # rolling issue exists yet (first ever IOC run); prev_* stay empty
+          # and we page.
+          issue_num="${FIND_ROLLING_ISSUE_NUM:-}"
+
+          prev_stamp=""
+          prev_paged_at=""
+          if [ -n "$issue_num" ]; then
+            # Dump comments authored by `github-actions[bot]` ONLY across
+            # all pages, then sort cross-page by created_at desc and pick
+            # the most recent marker occurrence. Filtering by author closes
+            # the marker-spoofing channel: without it, anyone with `issues:
+            # write` (or anyone able to social-engineer a maintainer into
+            # pasting attacker-supplied marker text) could inject
+            # `<!-- shai-hulud-ioc-stamp: <forged-sha256> -->` or
+            # `<!-- shai-hulud-paged-at: <future-iso8601> -->` into the
+            # rolling issue and silently suppress real Slack pages by
+            # poisoning the dedup chain. Only this workflow (running as
+            # GITHUB_TOKEN) emits the canonical markers, and its comments
+            # are authored by `github-actions[bot]` — restrict the source
+            # set accordingly.
+            # `gh api --paginate --jq '.[] | ...'` emits one JSON object
+            # per comment per page; jq -s re-slurps them so sort_by spans
+            # the whole history (per-page sorts would miss the global
+            # most-recent on multi-page rolling issues).
+            comments_nd="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/issues/${issue_num}/comments" \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | {body: .body, created_at: .created_at}' \
+              2>/dev/null || true)"
+            if [ -n "$comments_nd" ]; then
+              prev_stamp="$(printf '%s\n' "$comments_nd" \
+                | jq -rs '
+                    sort_by(.created_at) | reverse
+                    | .[].body
+                    | scan("<!-- shai-hulud-ioc-stamp: [0-9a-f]{64} -->")
+                  ' 2>/dev/null \
+                | head -1 \
+                | sed -E 's/^<!-- shai-hulud-ioc-stamp: ([0-9a-f]{64}) -->$/\1/' \
+                || true)"
+              prev_paged_at="$(printf '%s\n' "$comments_nd" \
+                | jq -rs '
+                    sort_by(.created_at) | reverse
+                    | .[].body
+                    | scan("<!-- shai-hulud-paged-at: [0-9TZ:\\-]+ -->")
+                  ' 2>/dev/null \
+                | head -1 \
+                | sed -E 's/^<!-- shai-hulud-paged-at: ([0-9TZ:\-]+) -->$/\1/' \
+                || true)"
+            fi
+          fi
+
+          should_page="false"
+          decision_reason="dedup-skip"
+          if [ -z "$prev_stamp" ]; then
+            should_page="true"; decision_reason="first-ioc-run"
+          elif [ "$prev_stamp" != "$current_stamp" ]; then
+            should_page="true"; decision_reason="ioc-changed"
+          elif [ -z "$prev_paged_at" ]; then
+            # Stamp continuity exists but we have no paged-at record (e.g.,
+            # a maintainer hand-edited the rolling issue, or an older
+            # comment predates this gate). Be conservative — page so a
+            # silent standing IOC can't slip through the dedup window.
+            should_page="true"; decision_reason="paged-at-missing"
+          else
+            now_epoch="$(date -u +%s)"
+            prev_epoch="$(date -u -d "$prev_paged_at" +%s 2>/dev/null || echo 0)"
+            age_s=$((now_epoch - prev_epoch))
+            if [ "$age_s" -ge "$WEEKLY_REPAGE_S" ]; then
+              should_page="true"; decision_reason="weekly-repage"
+            fi
+          fi
+
+          {
+            echo "current_stamp=$current_stamp"
+            echo "prev_stamp=$prev_stamp"
+            echo "prev_paged_at=$prev_paged_at"
+            echo "should_page=$should_page"
+            echo "decision_reason=$decision_reason"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::IOC dedup: should_page=$should_page reason=$decision_reason stamp=$current_stamp prev_stamp=${prev_stamp:-<none>} prev_paged_at=${prev_paged_at:-<none>}"
+
+      - name: Update rolling issue with findings
+        # Update the rolling issue on any non-clean run (operational OR IOC).
+        # Clean runs (exit 0) leave the issue alone — humans drive close /
+        # reopen so triage state survives across daily runs.
+        #
+        # `always()` keeps the rolling-issue update coupled to the sweep
+        # script's exit code only — decoupled from upstream step success.
+        # Without it, a flaky `Upload sweep artifacts` step (or any other
+        # earlier non-`always()` step that ends up failing) silently
+        # suppresses the operational-finding signal, leaving an exit-2 run
+        # invisible everywhere except the workflow run list. Mirrors the
+        # Slack page step's `always()` gating below.
+        if: always() && (steps.sweep.outputs.rc == '1' || steps.sweep.outputs.rc == '2')
+        shell: bash
+        env:
+          SWEEP_RC: ${{ steps.sweep.outputs.rc }}
+          SUMMARY_PATH: ${{ steps.sweep.outputs.summary_path }}
+          # Slack dedup state from the ioc-dedup step. Empty/unset for rc=2
+          # runs (dedup step is gated on rc=1), which intentionally skips
+          # marker emission below so operational comments don't poison the
+          # IOC dedup chain.
+          IOC_STAMP: ${{ steps.ioc-dedup.outputs.current_stamp }}
+          SHOULD_PAGE: ${{ steps.ioc-dedup.outputs.should_page }}
+          DECISION_REASON: ${{ steps.ioc-dedup.outputs.decision_reason }}
+          PREV_PAGED_AT: ${{ steps.ioc-dedup.outputs.prev_paged_at }}
+          FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
+          # Issue ops are scoped to THIS repo (allora-network/.github) and
+          # only need the workflow's own GITHUB_TOKEN with `issues: write`.
+          # A wider GH_ORG_READ_TOKEN (used above for org enumeration) may
+          # or may not include issues:write here — keep this scoped narrow.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$SUMMARY_PATH" ]; then
+            # Script's precondition gates (missing IOC seed files, missing
+            # required tooling, pre-aggregation crash) can exit non-zero
+            # before summary.md is written. The workflow's documented
+            # contract is "rc != 0 → rolling-issue update"; silently
+            # exiting here would break that contract and let an operational
+            # failure go un-triaged. Substitute a minimal placeholder so
+            # the issue gets the rc and run-URL even when there's no
+            # script-generated summary to attach.
+            echo "::warning::sweep summary missing or empty at $SUMMARY_PATH; emitting precondition-failed placeholder for rolling-issue update."
+            SUMMARY_PATH=/tmp/sweep-summary-placeholder.md
+            printf 'precondition failed: sweep script exited %s before producing summary.md. See workflow logs for the underlying error (missing IOC seed files, missing dependency, or pre-aggregation crash).\n' "$SWEEP_RC" \
+              > "$SUMMARY_PATH"
+          fi
+
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$SWEEP_RC" = "1" ]; then
+            grade="IOC findings (incident-grade)"
+          else
+            grade="operational findings only"
+          fi
+
+          # Visible Slack-decision footer for IOC-grade runs so a human
+          # scanning the rolling issue can see at a glance whether THIS run
+          # paged Slack and why — without paging the channel needs a
+          # rendered cue, not just a hidden HTML marker.
+          slack_line=""
+          if [ "$SWEEP_RC" = "1" ]; then
+            case "${SHOULD_PAGE:-}" in
+              true)
+                slack_line="- **Slack page:** yes (reason: \`${DECISION_REASON:-unknown}\`)"
+                ;;
+              false)
+                slack_line="- **Slack page:** suppressed (reason: \`${DECISION_REASON:-unknown}\`, prev paged \`${PREV_PAGED_AT:-unknown}\`; weekly re-page will fire if standing IOC persists)"
+                ;;
+              *)
+                slack_line="- **Slack page:** decision unavailable (ioc-dedup step did not run)"
+                ;;
+            esac
+          fi
+
+          {
+            echo "### Sweep run — $ts"
+            echo
+            echo "- **Result:** $grade (script exit \`$SWEEP_RC\`)"
+            echo "- **Run:** $run_url"
+            echo "- **Trigger:** \`${GITHUB_EVENT_NAME}\`"
+            [ -n "$slack_line" ] && echo "$slack_line"
+            echo
+            # Summary content may contain attacker-controllable strings via
+            # IOC `detail` fields (e.g., lockfile lines, commit messages from
+            # scanned repos). Wrap in a fenced code block and strip characters
+            # that could escape the fence or inject markdown/HTML in the
+            # rendered issue body. findings.json (preserved in the uploaded
+            # artifact) is the canonical un-sanitized source for forensic
+            # review.
+            #
+            # Sanitization set MUST stay in sync with the Slack step below
+            # (search for the identical `tr -d` invocation). Both surfaces
+            # render attacker-influenced strings; asymmetric drift would
+            # leave one channel exploitable. Stripping `[]()` neutralizes
+            # GitHub-Flavored-Markdown link syntax (`[click](https://evil)`)
+            # which survives the `<>|*_`` strip alone.
+            echo '```'
+            tr -d '`<>|*_[]()' < "$SUMMARY_PATH"
+            echo '```'
+            # Persist the IOC stamp marker so the next IOC-grade run can
+            # compare against it. Emitted ONLY for rc=1 with a real stamp
+            # — operational-only runs (rc=2) MUST NOT emit stamps (they'd
+            # corrupt the IOC dedup chain). The stamp represents the
+            # dedup-decision input (the IOC set we observed this run), not
+            # the Slack-delivery outcome — emitting it here regardless of
+            # Slack's eventual success is correct: the next run's dedup
+            # gate needs to know what IOC set this run observed.
+            #
+            # The paged-at marker is intentionally NOT emitted here. A
+            # downstream "Persist Slack-paged marker" step (gated on
+            # `success() && rc==1 && should_page==true`) appends a separate
+            # comment containing only `<!-- shai-hulud-paged-at: ... -->`
+            # AFTER the Slack page step actually succeeds, so a failed
+            # Slack delivery doesn't poison the dedup chain by recording a
+            # paged-at timestamp for a page that never landed. The dedup
+            # reader (ioc-dedup step) scans the most-recent paged-at marker
+            # across ALL bot-authored comments, so splitting the markers
+            # across two comments composes correctly with no parser change.
+            # Stamp/dedup-reason values are workflow-generated (sha256 hex
+            # / decision tokens) — no attacker input — so they bypass the
+            # summary sanitizer safely.
+            if [ "$SWEEP_RC" = "1" ] && [ -n "${IOC_STAMP:-}" ]; then
+              echo
+              echo "<!-- shai-hulud-ioc-stamp: ${IOC_STAMP} -->"
+              echo "<!-- shai-hulud-dedup-reason: ${DECISION_REASON:-unknown} -->"
+            fi
+          } > /tmp/sweep-comment.md
+
+          # Rolling-issue number resolved by the upstream find-rolling-issue
+          # step (oldest open issue with the rolling label wins, so a
+          # long-running incident issue stays the canonical thread even if
+          # someone files a duplicate later). A single canonical lookup
+          # eliminates the prior drift hazard between two independent
+          # `gh issue list` queries and closes a TOCTOU window where a
+          # human could close the rolling issue between the two queries.
+          existing="${FIND_ROLLING_ISSUE_NUM:-}"
+
+          if [ -n "$existing" ]; then
+            echo "Appending to existing rolling issue #$existing"
+            gh issue comment "$existing" --body-file /tmp/sweep-comment.md
+          else
+            echo "Creating new rolling issue (label=$ROLLING_LABEL)"
+            # `gh label create --force` upserts the label (no-op if it exists
+            # with matching properties; resets color/description otherwise).
+            # Idempotency makes this safe to run on every cold-start of the
+            # rolling-issue cycle without a preflight `gh label list` check.
+            gh label create "$ROLLING_LABEL" \
+              --description "Daily Shai-Hulud IOC sweep findings (DEVOP-560)" \
+              --color B60205 \
+              --force >/dev/null 2>&1 || true
+            title="[shai-hulud-sweep] rolling findings — $(date -u +%Y-%m)"
+            gh issue create \
+              --label "$ROLLING_LABEL" \
+              --title "$title" \
+              --body-file /tmp/sweep-comment.md
+          fi
+
+      - name: Page Slack on IOC findings
+        id: slack-page
+        # Only IOC-grade findings (exit 1) page Slack. Operational findings
+        # (exit 2) only update the rolling issue — those are worth review but
+        # not incident-grade and shouldn't generate after-hours pages.
+        # Also gated on the ioc-dedup step's `should_page` decision: a
+        # standing IOC that's identical to the previous run only re-pages on
+        # the weekly cadence (WEEKLY_REPAGE_S in ioc-dedup), not daily. See
+        # the ioc-dedup step above for the full decision policy and the
+        # cubic/ce-code-review P1 finding (PRRT_kwDOLZ5Xss6Ee5gN) that
+        # motivated this gate.
+        # No-ops cleanly if SLACK_SECURITY_WEBHOOK is unset (early exit, not
+        # a failure) so an org without the secret provisioned doesn't get a
+        # red daily workflow. The step emits a `delivered` output (`false` on
+        # this no-op path, `true` only after HTTP 200) so the paged-at marker
+        # step can distinguish an actual delivery from the intentional no-op.
+        if: always() && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
+        shell: bash
+        env:
+          SLACK_SECURITY_WEBHOOK: ${{ secrets.SLACK_SECURITY_WEBHOOK }}
+          SUMMARY_PATH: ${{ steps.sweep.outputs.summary_path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_SECURITY_WEBHOOK:-}" ]; then
+            echo "::warning::SLACK_SECURITY_WEBHOOK secret is not set; skipping Slack page."
+            # Record the no-op explicitly so the Persist Slack-paged marker step
+            # does NOT write a paged-at marker for a page that never went out —
+            # the dedup chain then treats this run as paged-at-missing and the
+            # next IOC-grade run pages conservatively once the webhook exists.
+            echo "delivered=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Read+sanitize the full summary, then let jq codepoint-slice to
+          # the Slack 3000-char-per-block limit below. An earlier version
+          # used `head -c 6000` to cap pre-sanitization, but byte-boundary
+          # truncation can split a multi-byte UTF-8 sequence (non-ASCII
+          # content can appear in IOC `detail` fields quoted from scanned
+          # repos). Under `set -euo pipefail`, a malformed UTF-8 byte
+          # passed via `jq --arg` aborts the step, silently dropping the
+          # IOC-grade Slack page on an unlucky boundary. summary.md is
+          # bounded by IOC count (one line per finding) so reading the
+          # whole file is safe in practice.
+          #
+          # Strip characters that could escape the Slack code fence or
+          # inject block-kit mrkdwn. IOC `detail` strings are attacker-
+          # influenceable; findings.json (preserved in the uploaded
+          # artifact) is the canonical un-sanitized source for forensic
+          # review.
+          #
+          # Sanitization set MUST stay in sync with the rolling-issue step
+          # above (search for the identical `tr -d` invocation). Both
+          # surfaces render attacker-influenced strings; asymmetric drift
+          # would leave one channel exploitable. Stripping `[]()`
+          # neutralizes Slack-mrkdwn / link-style sequences that survive
+          # the `<>|*_`` strip alone.
+          summary="$(tr -d '`<>|*_[]()' < "$SUMMARY_PATH" 2>/dev/null || echo 'summary unavailable')"
+          # jq builds the payload so embedded quotes/newlines/unicode in the
+          # summary can't break the JSON or inject Slack block-kit markup.
+          payload="$(jq -nc \
+            --arg run "$run_url" \
+            --arg org "$ORG" \
+            --arg summary "$summary" \
+            '{
+              text: (":rotating_light: Shai-Hulud IOC findings — " + $org),
+              blocks: [
+                { type: "header",
+                  text: { type: "plain_text", text: "Shai-Hulud IOC sweep — incident-grade findings" } },
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: (":rotating_light: *Shai-Hulud IOC findings — " + $org + "*\n<" + $run + "|Open workflow run>") } },
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: ("```\n" + ($summary | .[0:2800]) + "\n```") } }
+              ]
+            }')"
+          # Retry on transient HTTP failures with exponential backoff (5s,
+          # 15s, 45s). Implemented in shell (not `curl --retry`) so we can
+          # honor Slack's Retry-After header on HTTP 429.
+          # Success: HTTP 200. Retry: 408/429/5xx + curl connect failures.
+          # Terminal: any other 4xx (configuration bug, bad webhook, etc.).
+          #
+          # `RETRY_AFTER_MAX_S` caps the server-supplied Retry-After value
+          # so a misbehaving proxy (or a compromised webhook URL returning
+          # `Retry-After: 86400`) cannot consume the job's 60-minute budget
+          # in a single sleep and silently drop the IOC-grade Slack page.
+          # 120s comfortably exceeds Slack's documented Retry-After values
+          # while staying well inside the job timeout headroom.
+          http_code=000
+          attempt=0
+          delays=(5 15 45)
+          # Derive max_attempts from the delays array so the two cannot
+          # drift — bumping retries by adding a delay value is enough.
+          # Previously, a maintainer tuning `max_attempts=4` without
+          # adding a fourth element to `delays` would index past the
+          # array and `sleep ""` (which errors under `set -euo pipefail`
+          # and drops the Slack page).
+          max_attempts=${#delays[@]}
+          RETRY_AFTER_MAX_S=120
+          while [ "$attempt" -lt "$max_attempts" ]; do
+            attempt=$((attempt + 1))
+            # `curl -w '%{http_code}'` writes the HTTP code (or `000` on
+            # transport failure: connect refused, DNS fail, TLS error,
+            # connect-timeout) to stdout AND exits non-zero on transport
+            # failure. The previous `|| echo 000` form appended an extra
+            # `000` to that stdout, producing the literal string `000000`,
+            # which falls through the `000|408|429|5*` case to terminal=0
+            # and silently disables the curl-level retry path the loop
+            # exists for. `|| true` here keeps `set -euo pipefail` happy
+            # without corrupting the captured value; the `:= 000` default
+            # below pins the rare empty-output case to the documented
+            # transient-classification token.
+            http_code="$(curl -sS --connect-timeout 5 --max-time 15 \
+              -X POST -H 'Content-Type: application/json' \
+              --data "$payload" \
+              -D /tmp/slack.headers \
+              -o /tmp/slack.out \
+              -w '%{http_code}' \
+              "$SLACK_SECURITY_WEBHOOK" || true)"
+            : "${http_code:=000}"
+            if [ "$http_code" = "200" ]; then
+              break
+            fi
+            # Decide whether to retry. 408/429/5xx and curl-level failures
+            # (http_code=000) are transient; other 4xx are terminal.
+            case "$http_code" in
+              000|408|429|5*) transient=1 ;;
+              *)              transient=0 ;;
+            esac
+            if [ "$transient" -ne 1 ] || [ "$attempt" -ge "$max_attempts" ]; then
+              break
+            fi
+            sleep_for="${delays[$((attempt - 1))]}"
+            # If Slack sent Retry-After (429), prefer it when larger than our
+            # default backoff — being polite is cheap. Cap at
+            # RETRY_AFTER_MAX_S so a hostile/misconfigured upstream can't
+            # blow past the job timeout in a single sleep.
+            retry_after="$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/ {gsub(/[\r\n]/,"",$2); print $2; exit}' /tmp/slack.headers 2>/dev/null || true)"
+            if [ "$http_code" = "429" ] && [ -n "$retry_after" ] && [ "$retry_after" -gt "$sleep_for" ] 2>/dev/null; then
+              if [ "$retry_after" -gt "$RETRY_AFTER_MAX_S" ] 2>/dev/null; then
+                echo "::warning::Slack Retry-After=${retry_after}s exceeds cap ${RETRY_AFTER_MAX_S}s; clamping."
+                retry_after="$RETRY_AFTER_MAX_S"
+              fi
+              sleep_for="$retry_after"
+            fi
+            echo "::warning::Slack webhook attempt $attempt/$max_attempts returned HTTP $http_code; retrying in ${sleep_for}s."
+            sleep "$sleep_for"
+          done
+          if [ "$http_code" != "200" ]; then
+            echo "::error::Slack webhook returned HTTP $http_code after $attempt attempt(s): $(head -c 500 /tmp/slack.out 2>/dev/null || true)"
+            exit 1
+          fi
+          echo "Slack page delivered (HTTP $http_code, attempts=$attempt)."
+          echo "delivered=true" >> "$GITHUB_OUTPUT"
+
+      - name: Persist Slack-paged marker
+        # Append a one-line bot comment recording the moment Slack
+        # actually delivered the IOC page. Gated on `success()` of the
+        # upstream `Page Slack on IOC findings` step (and `rc==1 +
+        # should_page=='true'` for defense-in-depth), so a failed Slack
+        # delivery never writes a paged-at marker. Previously this marker
+        # was emitted inside the rolling-issue update step (before Slack
+        # ran), meaning a failed Slack send would still record a paged-at
+        # timestamp and silently corrupt the dedup chain for up to 7 days
+        # — the dedup gate would believe Slack had paged, suppress the
+        # next IOC-grade run's page, and the standing IOC would silently
+        # stop alerting until the weekly re-page window expired.
+        #
+        # The marker is in a SEPARATE comment from the IOC-stamp comment
+        # written by the update step above. The ioc-dedup reader scans
+        # the most-recent `<!-- shai-hulud-paged-at: ... -->` across ALL
+        # bot-authored comments on the rolling issue (sorted by
+        # created_at desc), so splitting the markers across two comments
+        # composes correctly with no parser change.
+        #
+        # The gate keys on `steps.slack-page.outcome == 'success'`
+        # (step-scoped) rather than job-wide `success()`, so a transient
+        # failure of an unrelated earlier step (e.g. artifact upload)
+        # cannot suppress the paged-at marker after Slack actually
+        # delivered — while a failed Slack delivery still records no
+        # marker, preserving the dedup chain's honesty.
+        # The `delivered == 'true'` condition additionally distinguishes an
+        # actual HTTP-200 delivery from the Slack step's unset-webhook no-op
+        # (which exits 0 = outcome success): without it, a run with no
+        # webhook provisioned would record a paged-at marker and suppress
+        # real pages for up to a week after the webhook is later provisioned.
+        if: always() && steps.slack-page.outcome == 'success' && steps.slack-page.outputs.delivered == 'true' && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
+        shell: bash
+        env:
+          FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
+          # `issues:write` only — same scope as the rolling-issue update
+          # step. The marker comment is workflow-generated content (a
+          # single hidden HTML marker with a workflow-supplied ISO8601
+          # timestamp), no attacker input.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          issue_num="${FIND_ROLLING_ISSUE_NUM:-}"
+          if [ -z "$issue_num" ]; then
+            # The update step above either appended to an existing issue
+            # or created a new one. If find-rolling-issue saw nothing AND
+            # the update step created a fresh issue (because $existing was
+            # empty), we need to look the new issue up here. Otherwise
+            # the paged-at marker would silently land nowhere and the
+            # dedup chain would believe Slack never paged.
+            issue_num="$(gh issue list \
+              --search "label:\"$ROLLING_LABEL\" state:open sort:created-asc" \
+              --limit 1 \
+              --json number \
+              --jq '.[0].number // empty' 2>/dev/null || true)"
+          fi
+          if [ -z "$issue_num" ]; then
+            echo "::warning::No rolling issue resolvable for paged-at marker; the next IOC-grade run will treat this as 'paged-at-missing' and conservatively page (fail-OPEN). Investigate why the update step neither found nor created a rolling issue."
+            exit 0
+          fi
+          paged_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # The marker MUST be the only meaningful content of the comment
+          # — the dedup scanner regex-greps for the marker in comment
+          # bodies, so additional surrounding text is fine but kept
+          # minimal here so human readers can see at a glance what the
+          # comment records.
+          {
+            echo "Slack page delivered at \`${paged_at}\`."
+            echo
+            echo "<!-- shai-hulud-paged-at: ${paged_at} -->"
+          } > /tmp/sweep-paged-at-comment.md
+          gh issue comment "$issue_num" --body-file /tmp/sweep-paged-at-comment.md
+          echo "::notice::Recorded paged-at=${paged_at} on rolling issue #${issue_num}."
+
+      - name: Slack page suppressed by IOC dedup
+        # IOC-grade run that matched the previous run's stamp and hasn't
+        # aged past the weekly re-page window. Surface a workflow notice
+        # so the run page makes the dedup decision obvious to anyone
+        # checking why Slack didn't fire — the rolling issue still got
+        # appended (above) for triage continuity.
+        if: always() && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page != 'true'
+        shell: bash
+        env:
+          DECISION_REASON: ${{ steps.ioc-dedup.outputs.decision_reason }}
+          PREV_PAGED_AT: ${{ steps.ioc-dedup.outputs.prev_paged_at }}
+        run: |
+          echo "::notice::IOC-grade run; Slack page suppressed by dedup (reason=${DECISION_REASON:-dedup-skip}, prev_paged_at=${PREV_PAGED_AT:-<none>}). Rolling issue updated; weekly re-page will fire if the standing IOC persists."
+
+      - name: Final run summary
+        if: always()
+        shell: bash
+        env:
+          SWEEP_RC: ${{ steps.sweep.outputs.rc }}
+          SHOULD_PAGE: ${{ steps.ioc-dedup.outputs.should_page }}
+          DECISION_REASON: ${{ steps.ioc-dedup.outputs.decision_reason }}
+        run: |
+          # SHOULD_PAGE is a tri-state output of the ioc-dedup step:
+          #   true  → Slack page step fired this run
+          #   false → Slack page step suppressed by dedup gate this run
+          #   ''    → ioc-dedup step did not produce outputs (e.g., the
+          #           step crashed under set -euo pipefail before writing
+          #           to $GITHUB_OUTPUT). The Slack page step's strict
+          #           `should_page == 'true'` gate then suppressed Slack;
+          #           the suppressed-by-dedup notice step's `!= 'true'`
+          #           gate fired ALSO. Surface this third state explicitly
+          #           rather than defaulting to "paged" — defaulting hid a
+          #           three-way contradiction between the Slack gate, the
+          #           suppression-notice gate, and this summary.
+          case "${SWEEP_RC:-x}" in
+            0) echo "::notice::Sweep clean (no findings)." ;;
+            1)
+              case "${SHOULD_PAGE:-}" in
+                true)
+                  echo "::warning::Sweep produced IOC-grade findings; Slack paged (reason=${DECISION_REASON:-unknown}). See rolling issue + Slack."
+                  ;;
+                false)
+                  echo "::warning::Sweep produced IOC-grade findings; Slack page deduped (reason=${DECISION_REASON:-dedup-skip}). See rolling issue; weekly re-page will fire if standing IOC persists."
+                  ;;
+                *)
+                  echo "::error::Sweep produced IOC-grade findings; Slack decision unavailable (ioc-dedup step did not produce outputs — likely crashed before writing GITHUB_OUTPUT). Investigate the ioc-dedup step in this run."
+                  ;;
+              esac
+              ;;
+            2) echo "::warning::Sweep produced operational findings only. See rolling issue." ;;
+            *) echo "::error::Sweep failed to produce a meaningful exit code (rc='${SWEEP_RC:-unset}')." ;;
+          esac

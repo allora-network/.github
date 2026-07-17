@@ -1,3 +1,4 @@
+# schema:v1
 # IOC SHA-256 hash list — known Shai-Hulud dropper payloads.
 #
 # Format: one lowercase hex SHA-256 per line, optional `# comment` after.
