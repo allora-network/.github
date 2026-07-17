@@ -555,6 +555,7 @@ jobs:
           fi
 
       - name: Page Slack on IOC findings
+        id: slack-page
         # Only IOC-grade findings (exit 1) page Slack. Operational findings
         # (exit 2) only update the rolling issue — those are worth review but
         # not incident-grade and shouldn't generate after-hours pages.
@@ -720,10 +721,13 @@ jobs:
         # created_at desc), so splitting the markers across two comments
         # composes correctly with no parser change.
         #
-        # `success() && ...` — `success()` is critical here: a default
-        # `if: always() && ...` would fire even when the Slack page step
-        # FAILED, reintroducing the very bug this gate exists to prevent.
-        if: success() && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
+        # The gate keys on `steps.slack-page.outcome == 'success'`
+        # (step-scoped) rather than job-wide `success()`, so a transient
+        # failure of an unrelated earlier step (e.g. artifact upload)
+        # cannot suppress the paged-at marker after Slack actually
+        # delivered — while a failed Slack delivery still records no
+        # marker, preserving the dedup chain's honesty.
+        if: always() && steps.slack-page.outcome == 'success' && steps.sweep.outputs.rc == '1' && steps.ioc-dedup.outputs.should_page == 'true'
         shell: bash
         env:
           FIND_ROLLING_ISSUE_NUM: ${{ steps.find-rolling-issue.outputs.issue_num }}
