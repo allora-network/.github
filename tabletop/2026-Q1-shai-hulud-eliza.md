@@ -7,7 +7,8 @@ and announces in `#security-alerts` at least 2 weeks before. The
 incident-lead role belongs to whichever DevOps engineer is on-call
 at exercise start time, which must not be the same person as the
 facilitator.
-**Duration:** 90 minutes (60 min exercise + 30 min debrief).
+**Duration:** 90 minutes (30 min clocked Phases 1–4; 30 min debrief
+with Phase 5 rotation; 30 min Phase 6 post-mortem).
 **Stakes:** zero production impact — pure simulation in a Slack channel.
 **Reference:** [`SECURITY-RUNBOOK.md`](../SECURITY-RUNBOOK.md) is the
 script every participant runs against. (The runbook lands via
