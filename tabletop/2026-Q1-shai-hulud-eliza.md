@@ -296,17 +296,17 @@ Within 48 hours of the exercise, the facilitator files:
 Things I'd specifically watch for during the run, since I wrote the
 runbook and have opinions about where the seams are:
 
-- **§5 Scenario C step 1** is the most decision-dense moment. The
+- **Runbook §5 Scenario C step 1** is the most decision-dense moment. The
   npm deprecate vs. unpublish vs. delete decision is the one place
   the runbook constrains authority — per-version `npm unpublish` is
   the lead's call (no extra gate); full-package deletion is gated
   per the §3 authority-chain paragraph and is forbidden in this
   scenario. Watch whether the team articulates that distinction
   correctly or routes around it.
-- **§7 Token rotation** is long. Watch whether the team
+- **Runbook §7 Token rotation** is long. Watch whether the team
   systematically walks the table or skips around. Skipping leads to
   missed rotations; that's a known failure mode.
-- **§9 Appendix command snippets** were written to be copy-paste-
+- **Runbook §9 Appendix command snippets** were written to be copy-paste-
   runnable. If anyone has to modify a snippet by hand to get it to
   work, that's a runbook-update ticket — note the exact modification.
 - The runbook's "Stop the bleed → Audit blast radius → Restore
